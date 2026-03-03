@@ -1,0 +1,15 @@
+{
+  "step1_source": "outputs/step1/combined_stations_clean_step1.xlsx",
+  "step2_config": "outputs/step2/config.json",
+  "model_path": "outputs/step3/model.keras",
+  "window": 10,
+  "horizon": 1,
+  "nan_strategy": "None (strict)",
+  "n_stations_predicted": 11,
+  "feature_source": "outputs/step2/features_clean_step2.*",
+  "saved_files": {
+    "csv": "outputs/step4/predictions_step4.csv",
+    "parquet": "outputs/step4/predictions_step4.parquet",
+    "info": "outputs/step4/step4_run.json"
+  }
+}

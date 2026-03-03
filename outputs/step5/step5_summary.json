@@ -1,0 +1,29 @@
+{
+  "paths": {
+    "X": "outputs/step2/X.npy",
+    "y": "outputs/step2/y.npy",
+    "meta": "outputs/step2/meta.csv",
+    "model": "outputs/step3/model.keras"
+  },
+  "splits": {
+    "train": {
+      "start": "2016-01-01",
+      "end": "2022-12-31",
+      "n": 4
+    },
+    "val": {
+      "start": "2023-01-01",
+      "end": "2023-12-31",
+      "n": 0
+    },
+    "test": {
+      "start": "2024-01-01",
+      "end": "2025-12-31",
+      "n": 10
+    }
+  },
+  "test_overall": {
+    "MAE_mean_over_targets": 3.4857723911603293,
+    "RMSE_mean_over_targets": 4.22395923945088
+  }
+}

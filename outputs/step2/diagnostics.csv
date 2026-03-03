@@ -1,0 +1,12 @@
+station,rows,possible_windows,kept_windows,dropped_target_nan,dropped_nan_ratio,reason
+jakabszallas,1421,1411,0,0,1411,all windows dropped (NaNs/targets missing)
+szod,1454,1444,0,0,1444,all windows dropped (NaNs/targets missing)
+sandorfalva,2128,2118,0,0,2118,all windows dropped (NaNs/targets missing)
+izsak,2146,2136,0,0,2136,all windows dropped (NaNs/targets missing)
+csolyospalos,2212,2202,0,0,2202,all windows dropped (NaNs/targets missing)
+kecel,2274,2264,0,0,2264,all windows dropped (NaNs/targets missing)
+tazlar,2648,2638,0,0,2638,all windows dropped (NaNs/targets missing)
+nagykoros,3222,3212,0,0,3212,all windows dropped (NaNs/targets missing)
+hernad,3270,3260,4,0,3256,ok
+csongrad,2143,2133,5,0,2128,ok
+csengele,2292,2282,5,0,2277,ok

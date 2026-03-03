@@ -1,0 +1,17 @@
+{
+  "inputs": {
+    "step2_config": "outputs/step2/config.json",
+    "model": "outputs/step3/model.keras",
+    "feature_source": "outputs/step2/features_clean_step2.parquet"
+  },
+  "settings": {
+    "n_steps": 7,
+    "method": "Autoregressive (recommended)",
+    "window": 10,
+    "targets_in_features": false
+  },
+  "outputs": {
+    "csv": "outputs/step8/step8_multistep_forecast.csv",
+    "summary": "outputs/step8/step8_summary.json"
+  }
+}
