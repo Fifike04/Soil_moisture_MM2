@@ -6,6 +6,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Step 8 — Multi-step forecasting", layout="wide")
+st.title("Step 8 — Multi-step forecasting (DISK ONLY from outputs/)")
 
 STATION_COL = "station"
 DATE_COL = "date"
@@ -46,103 +47,78 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=[DATE_COL]).sort_values([STATION_COL, DATE_COL])
     return df
 
-def add_lags_and_rollings(
-    df: pd.DataFrame,
-    group_col: str,
-    lag_cols: list[str],
-    lags: list[int],
-    roll_sum_cols: list[str],
-    roll_sum_windows: list[int],
-    roll_mean_cols: list[str],
-    roll_mean_windows: list[int],
-):
-    out = df.copy()
-    g = out.groupby(group_col, group_keys=False)
-
-    for c in lag_cols:
-        if c in out.columns:
-            for L in lags:
-                out[f"{c}_lag{L}"] = g[c].shift(L)
-
-    for c in roll_sum_cols:
-        if c in out.columns:
-            for w in roll_sum_windows:
-                out[f"{c}_sum{w}"] = g[c].rolling(window=w, min_periods=1).sum().reset_index(level=0, drop=True)
-
-    for c in roll_mean_cols:
-        if c in out.columns:
-            for w in roll_mean_windows:
-                out[f"{c}_mean{w}"] = g[c].rolling(window=w, min_periods=1).mean().reset_index(level=0, drop=True)
-
-    return out
-
-def apply_nan_strategy(df_feat: pd.DataFrame, strategy: str):
-    if strategy == "None (strict)":
-        return df_feat
-    if strategy == "Forward fill within station":
-        return df_feat.groupby(STATION_COL, group_keys=False).apply(lambda g: g.ffill())
-
-    def interp_group(g):
-        g = g.copy().sort_values(DATE_COL).set_index(DATE_COL)
-        num_cols = g.select_dtypes(include=["float64", "float32", "int64", "int32"]).columns
-        g[num_cols] = g[num_cols].interpolate(method="time", limit_direction="both")
-        return g.reset_index()
-
-    out = df_feat.groupby(STATION_COL, group_keys=False).apply(interp_group)
-    return out.sort_values([STATION_COL, DATE_COL])
-
 def to_numeric_safe(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
         if c not in out.columns:
             continue
         if out[c].dtype == object:
-            s = out[c].astype(str).str.replace(",", ".", regex=False)
+            s = (
+                out[c].astype(str).str.strip().str.replace(",", ".", regex=False)
+                .replace({"": np.nan, "nan": np.nan, "None": np.nan})
+            )
             out[c] = pd.to_numeric(s, errors="coerce")
         else:
             out[c] = pd.to_numeric(out[c], errors="coerce")
     return out
+
+def apply_saved_scaler_if_exists(X_3d: np.ndarray, scaler_path: str) -> tuple[np.ndarray, dict | None]:
+    if not os.path.exists(scaler_path):
+        return X_3d, None
+    try:
+        with open(scaler_path, "r", encoding="utf-8") as f:
+            sc = json.load(f)
+        mu = np.asarray(sc["mean"], dtype=np.float32)
+        sd = np.asarray(sc["std"], dtype=np.float32)
+        sd = np.where(sd == 0, 1.0, sd).astype(np.float32)
+
+        if mu.shape[0] != X_3d.shape[-1]:
+            return X_3d, None
+
+        return ((X_3d.astype(np.float32) - mu) / sd).astype(np.float32), sc
+    except Exception:
+        return X_3d, None
 
 def update_feature_vector_autoregressive(
     last_feat_vec: np.ndarray,
     feature_cols: list[str],
     target_cols: list[str],
     y_pred: np.ndarray,
-    max_lag: int = 30,
+    max_lag: int = 60,
 ):
     """
-    Next-step feature vector from last timestep feature vector.
-
-    - If feature is exactly a target col (e.g. _SM10), replace with predicted value.
-    - Shift lags for targets: lag1 <- prev base, lag2 <- prev lag1, ...
-    - Other features persist (unchanged).
+    Updates ONLY what is safe:
+    - base target features: _SM10 etc (if they exist among features)
+    - target lags: _SM10_lag1.. etc (if they exist)
+    Everything else persists.
     """
     next_vec = last_feat_vec.copy()
     idx = {c: j for j, c in enumerate(feature_cols)}
     pred_map = {t: float(y_pred[i]) for i, t in enumerate(target_cols) if i < len(y_pred)}
 
-    # Update base target features
+    # base target features updated to predicted
     for t, val in pred_map.items():
         if t in idx:
             next_vec[idx[t]] = val
 
-    # Shift target lags
+    # shift lags for each target, if present
     for t in target_cols:
-        base_j = idx.get(t, None)
-        if base_j is None:
+        if t not in idx:
             continue
 
-        prev_base = float(last_feat_vec[base_j])
+        prev_base = float(last_feat_vec[idx[t]])
 
-        lag1_name = f"{t}_lag1"
-        if lag1_name in idx:
-            next_vec[idx[lag1_name]] = prev_base
+        # lag1 <= previous base
+        n1 = f"{t}_lag1"
+        if n1 in idx:
+            next_vec[idx[n1]] = prev_base
 
+        # lagk <= previous lag(k-1)
         for k in range(2, max_lag + 1):
-            name_k = f"{t}_lag{k}"
-            name_km1 = f"{t}_lag{k-1}"
-            if name_k in idx and name_km1 in idx:
-                next_vec[idx[name_k]] = float(last_feat_vec[idx[name_km1]])
+            nk = f"{t}_lag{k}"
+            nkm1 = f"{t}_lag{k-1}"
+            if nk in idx and nkm1 in idx:
+                next_vec[idx[nk]] = float(last_feat_vec[idx[nkm1]])
 
     return next_vec
 
@@ -151,46 +127,38 @@ def update_feature_vector_autoregressive(
 # -----------------------------
 cfg_path = os.path.join(OUT2, "config.json")
 model_path = os.path.join(OUT3, "model.keras")
-require(cfg_path, "Step2 config.json (outputs/step2/config.json)")
-require(model_path, "Step3 model.keras (outputs/step3/model.keras)")
+scaler_path = os.path.join(OUT3, "x_scaler.json")
+
+require(cfg_path, "Step2 config.json")
+require(model_path, "Step3 model.keras")
 
 with open(cfg_path, "r", encoding="utf-8") as f:
     step2_cfg = json.load(f)
 
-# Feature cols / targets / window
 window = int(step2_cfg.get("window", 30))
 final_feature_cols = step2_cfg.get("final_feature_cols", [])
 target_cols = step2_cfg.get("target_cols", DEFAULT_TARGETS)
-nan_strategy = step2_cfg.get("nan_strategy", "Time-based interpolation (numeric) within station")
 
 if not final_feature_cols:
     st.error("Step2 config.json missing 'final_feature_cols'.")
     st.stop()
-
-# Optional: if you decide to store these in Step2 config later
-lag_cols = step2_cfg.get("lag_cols", [])
-lags = step2_cfg.get("lags", [])
-roll_sum_cols = step2_cfg.get("roll_sum_cols", [])
-roll_sum_windows = step2_cfg.get("roll_sum_windows", [])
-roll_mean_cols = step2_cfg.get("roll_mean_cols", [])
-roll_mean_windows = step2_cfg.get("roll_mean_windows", [])
 
 # Load model
 try:
     import tensorflow as tf
     model = tf.keras.models.load_model(model_path)
 except Exception as e:
-    st.error("Failed to load outputs/step3/model.keras")
+    st.error("Failed to load model.keras")
     st.exception(e)
     st.stop()
 
-st.subheader("Config summary (from outputs/step2/config.json)")
+st.subheader("Config summary (Step2)")
 st.write({
     "window": window,
     "targets": target_cols,
     "n_feature_cols": len(final_feature_cols),
-    "nan_strategy": nan_strategy,
-    "model_path": model_path
+    "model": model_path,
+    "scaler": scaler_path if os.path.exists(scaler_path) else None,
 })
 with st.expander("Step2 config.json"):
     st.json(step2_cfg)
@@ -198,11 +166,10 @@ with st.expander("Step2 config.json"):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Step 8 — Multi-step forecasting (autoregressive, DISK ONLY)")
-
 with st.sidebar:
     st.header("Forecast settings")
     n_steps = st.slider("Forecast steps (days ahead)", 2, 30, 7, 1)
+
     method = st.selectbox(
         "Multi-step method",
         ["Autoregressive (recommended)", "Repeat last window (fallback)"],
@@ -210,98 +177,56 @@ with st.sidebar:
     )
 
     st.divider()
+    st.header("Scaling")
+    apply_scaling = st.checkbox("Apply Step3 scaling (x_scaler.json) if available", value=True)
+
+    st.divider()
     st.header("Feature source")
-    # Best option: reuse engineered features if saved by Step2
     feat_parquet = os.path.join(OUT2, "features_clean_step2.parquet")
     feat_csv = os.path.join(OUT2, "features_clean_step2.csv")
-    use_saved_feat = os.path.exists(feat_parquet) or os.path.exists(feat_csv)
-    use_saved_feat = st.checkbox("Use engineered features saved by Step2 (recommended if exists)", value=use_saved_feat)
+    auto_use_saved = os.path.exists(feat_parquet) or os.path.exists(feat_csv)
+    use_saved_feat = st.checkbox("Use engineered features saved by Step2", value=auto_use_saved)
 
 # -----------------------------
-# Load data / features
+# Load engineered features (recommended)
 # -----------------------------
 df_feat_source = None
-
-if use_saved_feat:
-    if os.path.exists(feat_parquet):
-        df_feat = pd.read_parquet(feat_parquet)
-        df_feat_source = feat_parquet
-    elif os.path.exists(feat_csv):
-        df_feat = pd.read_csv(feat_csv)
-        df_feat_source = feat_csv
-    else:
-        # fallback if user forced checkbox but files not there
-        use_saved_feat = False
-
-if not use_saved_feat:
+if use_saved_feat and (os.path.exists(feat_parquet) or os.path.exists(feat_csv)):
+    df_feat = pd.read_parquet(feat_parquet) if os.path.exists(feat_parquet) else pd.read_csv(feat_csv)
+    df_feat_source = feat_parquet if os.path.exists(feat_parquet) else feat_csv
+else:
     df_raw, step1_path = load_step1_clean()
     if df_raw is None:
         st.error("Step1 cleaned data not found in outputs/step1/.")
-        st.code(os.path.join(OUT1, "combined_stations_clean_step1.csv"))
-        st.code(os.path.join(OUT1, "combined_stations_clean_step1.xlsx"))
         st.stop()
-    df = normalize_df(df_raw)
-    df_feat = df.copy()
-
-    # If Step2 config doesn't store lag/rolling params, we cannot perfectly rebuild them.
-    if not (lag_cols and lags) and not (roll_sum_cols and roll_sum_windows) and not (roll_mean_cols and roll_mean_windows):
-        st.warning(
-            "Step2 config.json does not contain lag/rolling settings (lag_cols/lags/roll_*). "
-            "So Step8 will NOT regenerate engineered features. "
-            "Recommendation: in Step2, also save df_feat to outputs/step2/features_clean_step2.parquet."
-        )
-    else:
-        with st.spinner("Rebuilding engineered features from Step2 config..."):
-            df_feat = add_lags_and_rollings(
-                df=df,
-                group_col=STATION_COL,
-                lag_cols=lag_cols,
-                lags=list(map(int, lags)),
-                roll_sum_cols=roll_sum_cols,
-                roll_sum_windows=list(map(int, roll_sum_windows)),
-                roll_mean_cols=roll_mean_cols,
-                roll_mean_windows=list(map(int, roll_mean_windows)),
-            )
-            df_feat = apply_nan_strategy(df_feat, nan_strategy)
+    df_feat = df_raw.copy()
+    df_feat_source = step1_path
+    st.warning("Using Step1 only (no engineered features). This may be incomplete vs Step2 features.")
 
 df_feat = normalize_df(df_feat)
+df_feat = to_numeric_safe(df_feat, final_feature_cols + target_cols)
 
 st.subheader("Feature source")
-st.write(df_feat_source if df_feat_source else "recomputed from outputs/step1 (may be incomplete)")
-st.subheader("Engineered data preview (tail)")
-st.dataframe(df_feat.tail(20), use_container_width=True)
+st.write(df_feat_source)
+st.dataframe(df_feat.tail(15), use_container_width=True)
 
-# Ensure required feature columns exist
 missing_feat_cols = [c for c in final_feature_cols if c not in df_feat.columns]
 if missing_feat_cols:
     st.error(f"Missing feature columns in df_feat (first 30): {missing_feat_cols[:30]}")
-    st.info(
-        "Fix: save engineered features in Step2 to outputs/step2/features_clean_step2.parquet "
-        "and enable 'Use engineered features saved by Step2'."
-    )
+    st.info("Fix: ensure Step2 saved features_clean_step2.parquet/csv and enable the checkbox.")
     st.stop()
 
-# Numeric coercion for feature cols
-df_feat = to_numeric_safe(df_feat, final_feature_cols + target_cols)
-
-# Check whether autoregressive is possible (targets must be in feature set)
 targets_in_features = all(t in final_feature_cols for t in target_cols)
 if method.startswith("Autoregressive") and not targets_in_features:
     st.warning(
-        "Autoregressive forecasting requires ALL target columns to be included among final_feature_cols. "
-        "Otherwise the window can't be updated meaningfully. Switching to fallback method is recommended."
+        "Autoregressive update needs ALL target columns present in final_feature_cols. "
+        "Otherwise forecasts drift badly. Switch to fallback or add targets as features in Step2."
     )
 
 # -----------------------------
-# Build last window per station
+# Build last window per station (unscaled feature space)
 # -----------------------------
-st.subheader("Multi-step forecast")
-
-stations = []
-last_dates = []
-X0_list = []
-skipped = []
-
+stations, last_dates, X0_list, skipped = [], [], [], []
 for stn, g in df_feat.groupby(STATION_COL):
     g = g.sort_values(DATE_COL)
     if len(g) < window:
@@ -311,7 +236,6 @@ for stn, g in df_feat.groupby(STATION_COL):
     Xw = w[final_feature_cols].to_numpy(dtype=np.float32)
 
     if np.isnan(Xw).any():
-        # Fill NaNs (similar spirit as Step2)
         col_means = np.nanmean(Xw, axis=0)
         inds = np.where(np.isnan(Xw))
         Xw[inds] = np.take(col_means, inds[1])
@@ -331,17 +255,26 @@ if skipped:
     with st.expander("Skipped stations"):
         st.dataframe(pd.DataFrame(skipped, columns=["station", "reason"]), use_container_width=True)
 
-X_unscaled = np.stack(X0_list, axis=0)  # (S, window, F)
+X_window = np.stack(X0_list, axis=0)  # (S, window, F)
 
 # -----------------------------
-# Forecast loop (no scaling)
+# Forecast loop
 # -----------------------------
-all_preds = []  # list of (S, targets) per step
+all_preds = []
 forecast_dates = []
 
+sc_used = None
+if apply_scaling:
+    _, sc_used = apply_saved_scaler_if_exists(X_window[:1], scaler_path)
+
 for step in range(1, n_steps + 1):
+    # scale just for prediction (keep X_window in original feature units)
+    X_in = X_window
+    if apply_scaling and sc_used is not None:
+        X_in, _ = apply_saved_scaler_if_exists(X_window, scaler_path)
+
     with st.spinner(f"Predicting step {step}/{n_steps}..."):
-        y_pred = model.predict(X_unscaled, verbose=0)
+        y_pred = model.predict(X_in, verbose=0)
 
     if y_pred.ndim == 1:
         y_pred = y_pred.reshape(-1, 1)
@@ -349,30 +282,27 @@ for step in range(1, n_steps + 1):
     all_preds.append(y_pred)
     forecast_dates.append([d + pd.Timedelta(days=step) for d in last_dates])
 
-    if method.startswith("Repeat") or (method.startswith("Autoregressive") and not targets_in_features):
+    if method.startswith("Repeat"):
         continue
 
-    # Autoregressive update (in feature space)
-    for i in range(X_unscaled.shape[0]):
-        last_vec = X_unscaled[i, -1, :].copy()
-        next_vec = update_feature_vector_autoregressive(
-            last_feat_vec=last_vec,
-            feature_cols=final_feature_cols,
-            target_cols=target_cols,
-            y_pred=y_pred[i, :],
-            max_lag=30
-        )
-
-        # shift left and append
-        X_unscaled[i, :-1, :] = X_unscaled[i, 1:, :]
-        X_unscaled[i, -1, :] = next_vec
+    if method.startswith("Autoregressive") and targets_in_features:
+        # update last row, shift window
+        for i in range(X_window.shape[0]):
+            last_vec = X_window[i, -1, :].copy()
+            next_vec = update_feature_vector_autoregressive(
+                last_feat_vec=last_vec,
+                feature_cols=final_feature_cols,
+                target_cols=target_cols,
+                y_pred=y_pred[i, :],
+                max_lag=60
+            )
+            X_window[i, :-1, :] = X_window[i, 1:, :]
+            X_window[i, -1, :] = next_vec
 
 # -----------------------------
-# Build output table
+# Output table
 # -----------------------------
 pred_stack = np.stack(all_preds, axis=1)  # (S, steps, out_dim)
-
-# column names for outputs
 out_dim = pred_stack.shape[2]
 out_targets = target_cols[:out_dim] if len(target_cols) >= out_dim else [f"y{i}" for i in range(out_dim)]
 
@@ -390,17 +320,15 @@ for si, stn in enumerate(stations):
         rows.append(row)
 
 out_df = pd.DataFrame(rows)
-
 st.success("Multi-step forecast finished ✅")
 st.dataframe(out_df.head(50), use_container_width=True)
 
 # -----------------------------
-# Plot per station (lines)
+# Plot
 # -----------------------------
 st.subheader("Plots")
 selected_station = st.selectbox("Select station to plot", options=stations, index=0)
 station_df = out_df[out_df["station"] == selected_station].sort_values("step_ahead_days")
-
 for t in out_targets:
     fig = plt.figure()
     plt.plot(station_df["step_ahead_days"], station_df[t], marker="o")
@@ -410,7 +338,7 @@ for t in out_targets:
     st.pyplot(fig)
 
 # -----------------------------
-# Save to outputs/step8
+# Save
 # -----------------------------
 st.subheader("Save outputs")
 if st.button("Save forecast to outputs/step8/"):
@@ -418,12 +346,12 @@ if st.button("Save forecast to outputs/step8/"):
     out_json = os.path.join(OUT8, "step8_summary.json")
 
     out_df.to_csv(out_csv, index=False)
-
     summary = {
         "inputs": {
             "step2_config": cfg_path,
             "model": model_path,
-            "feature_source": df_feat_source if df_feat_source else "recomputed_from_outputs/step1",
+            "x_scaler": scaler_path if (apply_scaling and os.path.exists(scaler_path)) else None,
+            "feature_source": df_feat_source,
         },
         "settings": {
             "n_steps": int(n_steps),
@@ -431,10 +359,7 @@ if st.button("Save forecast to outputs/step8/"):
             "window": int(window),
             "targets_in_features": bool(targets_in_features),
         },
-        "outputs": {
-            "csv": out_csv,
-            "summary": out_json
-        }
+        "outputs": {"csv": out_csv, "summary": out_json}
     }
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
@@ -442,15 +367,15 @@ if st.button("Save forecast to outputs/step8/"):
     st.success("Saved ✅")
     st.code("\n".join([out_csv, out_json]))
 
-# Download button (optional)
 st.divider()
 csv_bytes = out_df.to_csv(index=False).encode("utf-8")
 st.download_button("Download forecasts (CSV)", data=csv_bytes, file_name="step8_multistep_forecast.csv", mime="text/csv")
 
 with st.expander("Notes / limitations", expanded=False):
     st.write("""
-- This app performs multi-step forecasting using a 1-step model.
-- Autoregressive updating is reliable only if target columns (e.g., _SM10.._SM75) are present among feature columns.
-- Rolling features and exogenous predictors for future days are kept as persistence (unchanged) unless you provide future exogenous data.
-- Best practice for multi-step is a direct multi-horizon model, or provide future meteorological predictors.
+- Step8 uses a 1-step model recursively.
+- Only target and lag features can be updated safely without future meteorological drivers.
+- If you want high-quality multi-step forecasts, best practice is:
+  (1) direct multi-horizon model, OR
+  (2) provide future exogenous predictors (rain/temp/ET forecasts).
 """)
