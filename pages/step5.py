@@ -6,16 +6,17 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Step 5 — Diagnostics & reporting", layout="wide")
-st.title("Step 5 — Diagnostics & reporting (DISK ONLY from outputs/)")
+st.title("Step 5 — Diagnostics & reporting (STRICT DISK MODE)")
 
 OUT2 = os.path.join("outputs", "step2")
 OUT3 = os.path.join("outputs", "step3")
 OUT5 = os.path.join("outputs", "step5")
 os.makedirs(OUT5, exist_ok=True)
 
-# -----------------------------
-# Helpers
-# -----------------------------
+# --------------------------------------------------
+# Utility functions
+# --------------------------------------------------
+
 def require(path: str, label: str):
     if not os.path.exists(path):
         st.error(f"Missing required file: {label}")
@@ -26,306 +27,250 @@ def mae(y_true, y_pred):
     return float(np.mean(np.abs(y_true - y_pred)))
 
 def mse(y_true, y_pred):
-    d = (y_true - y_pred)
-    return float(np.mean(d * d))
+    return float(np.mean((y_true - y_pred) ** 2))
 
 def rmse(y_true, y_pred):
     return float(np.sqrt(mse(y_true, y_pred)))
 
 def r2(y_true, y_pred):
-    # R2 = 1 - SS_res/SS_tot
-    yt = y_true
-    yp = y_pred
-    ss_res = float(np.sum((yt - yp) ** 2))
-    ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
-    if ss_tot == 0:
-        return float("nan")
-    return float(1.0 - ss_res / ss_tot)
+    ss_res = float(np.sum((y_true - y_pred) ** 2))
+    ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
+    return float(1 - ss_res / ss_tot) if ss_tot != 0 else float("nan")
 
-def split_by_date(meta_df: pd.DataFrame, start: str, end: str) -> np.ndarray:
+def bias(y_true, y_pred):
+    return float(np.mean(y_pred - y_true))
+
+def rel_error_pct(y_true, y_pred):
+    return float(np.mean(np.abs((y_pred - y_true) / (y_true + 1e-8))) * 100)
+
+def split_by_date(meta_df, start, end):
     d = pd.to_datetime(meta_df["target_date"], errors="coerce")
     return ((d >= pd.to_datetime(start)) & (d <= pd.to_datetime(end))).to_numpy()
 
-def metrics_by_depth(y_true_2d: np.ndarray, y_pred_2d: np.ndarray, target_names: list[str]) -> pd.DataFrame:
-    rows = []
-    for j in range(y_true_2d.shape[1]):
-        yt = y_true_2d[:, j]
-        yp = y_pred_2d[:, j]
-        rows.append({
-            "target": target_names[j] if j < len(target_names) else f"target{j}",
-            "MAE": mae(yt, yp),
-            "RMSE": rmse(yt, yp),
-            "R2": r2(yt, yp),
-        })
-    return pd.DataFrame(rows)
+def apply_saved_scaler_if_exists(X_3d, scaler_path):
+    if not os.path.exists(scaler_path):
+        return X_3d, None
+    try:
+        with open(scaler_path, "r", encoding="utf-8") as f:
+            sc = json.load(f)
+        mu = np.asarray(sc["mean"], dtype=np.float32)
+        sd = np.asarray(sc["std"], dtype=np.float32)
+        sd = np.where(sd == 0, 1.0, sd)
+        if mu.shape[0] != X_3d.shape[-1]:
+            return X_3d, None
+        return ((X_3d - mu) / sd).astype(np.float32), sc
+    except:
+        return X_3d, None
 
-def metrics_by_station(meta_df: pd.DataFrame, y_true_2d: np.ndarray, y_pred_2d: np.ndarray, target_names: list[str]) -> pd.DataFrame:
-    if "station" not in meta_df.columns:
-        return pd.DataFrame({"error": ["meta_df has no 'station' column"]})
+def naive_persistence_baseline(X_test, target_dim):
+    # Predict next = last value in window
+    last_step = X_test[:, -1, :]
+    return last_step[:, :target_dim]
 
-    rows = []
-    groups = meta_df.groupby("station").groups
-    for stn, idx in groups.items():
-        idx = np.array(list(idx), dtype=int)
-        yt = y_true_2d[idx]
-        yp = y_pred_2d[idx]
+# --------------------------------------------------
+# Load artifacts
+# --------------------------------------------------
 
-        maes = []
-        rmses = []
-        for j in range(yt.shape[1]):
-            maes.append(mae(yt[:, j], yp[:, j]))
-            rmses.append(rmse(yt[:, j], yp[:, j]))
-
-        rows.append({
-            "station": stn,
-            "n_samples": int(len(idx)),
-            "MAE_mean": float(np.mean(maes)),
-            "RMSE_mean": float(np.mean(rmses)),
-        })
-
-    return pd.DataFrame(rows).sort_values("RMSE_mean", ascending=False)
-
-def plot_error_hist(errors_1d: np.ndarray, title: str):
-    fig = plt.figure()
-    plt.hist(errors_1d, bins=40)
-    plt.title(title)
-    plt.xlabel("Error")
-    plt.ylabel("Count")
-    return fig
-
-def plot_true_vs_pred(y_true_2d: np.ndarray, y_pred_2d: np.ndarray, target_names: list[str], max_points=600):
-    figs = []
-    n = min(len(y_true_2d), max_points)
-    x = np.arange(n)
-    for j in range(y_true_2d.shape[1]):
-        fig = plt.figure()
-        plt.plot(x, y_true_2d[:n, j], label="true")
-        plt.plot(x, y_pred_2d[:n, j], label="pred")
-        name = target_names[j] if j < len(target_names) else f"target{j}"
-        plt.title(f"True vs Pred — {name} (first {n})")
-        plt.xlabel("Sample index")
-        plt.ylabel("Value")
-        plt.legend()
-        figs.append(fig)
-    return figs
-
-# -----------------------------
-# Load artifacts from outputs/
-# -----------------------------
 x_path = os.path.join(OUT2, "X.npy")
 y_path = os.path.join(OUT2, "y.npy")
 meta_path = os.path.join(OUT2, "meta.csv")
-cfg_path = os.path.join(OUT2, "config.json")  # optional
-
+cfg_path = os.path.join(OUT2, "config.json")
 model_path = os.path.join(OUT3, "model.keras")
-metrics3_path = os.path.join(OUT3, "metrics.json")  # optional
+scaler_path = os.path.join(OUT3, "x_scaler.json")
 
-require(x_path, "Step2 X.npy (outputs/step2/X.npy)")
-require(y_path, "Step2 y.npy (outputs/step2/y.npy)")
-require(meta_path, "Step2 meta.csv (outputs/step2/meta.csv)")
-require(model_path, "Step3 model.keras (outputs/step3/model.keras)")
+require(x_path, "X.npy")
+require(y_path, "y.npy")
+require(meta_path, "meta.csv")
+require(model_path, "model.keras")
 
-X = np.load(x_path, allow_pickle=True)
-y = np.load(y_path, allow_pickle=True)
+X = np.load(x_path)
+y = np.load(y_path)
 meta_df = pd.read_csv(meta_path)
 
-step2_cfg = {}
-if os.path.exists(cfg_path):
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        step2_cfg = json.load(f)
-
-step3_metrics = {}
-if os.path.exists(metrics3_path):
-    with open(metrics3_path, "r", encoding="utf-8") as f:
-        step3_metrics = json.load(f)
-
-# Basic checks
-if X.ndim != 3:
-    st.error(f"Expected X as 3D (N,T,F). Got: {X.shape}")
-    st.stop()
-
-# y can be (N,) or (N,targets)
 if y.ndim == 1:
-    y2 = y.reshape(-1, 1)
-elif y.ndim == 2:
-    y2 = y
-else:
-    st.error(f"Expected y as 1D or 2D. Got: {y.shape}")
-    st.stop()
+    y = y.reshape(-1, 1)
 
-if "target_date" not in meta_df.columns:
-    st.error("meta.csv must contain 'target_date' column.")
-    st.stop()
+meta_df["target_date"] = pd.to_datetime(meta_df["target_date"], errors="coerce")
 
-if len(meta_df) != len(y2):
-    st.error(f"meta.csv length must match y length. meta={len(meta_df)}, y={len(y2)}")
-    st.stop()
+with open(cfg_path, "r") as f:
+    step2_cfg = json.load(f)
 
-# target names (from step2 config if available)
-target_names = step2_cfg.get("target_cols", [])
-if not target_names:
-    target_names = [f"target{i}" for i in range(y2.shape[1])]
-if len(target_names) != y2.shape[1]:
-    target_names = [f"target{i}" for i in range(y2.shape[1])]
+target_names = step2_cfg.get("target_cols", [f"target{i}" for i in range(y.shape[1])])
 
-st.success("Loaded Step2 + Step3 artifacts from outputs ✅")
-with st.expander("Paths & configs"):
-    st.write("Step2:")
-    st.code("\n".join([x_path, y_path, meta_path]))
-    if step2_cfg:
-        st.write("Step2 config.json:")
-        st.json(step2_cfg)
-    st.write("Step3:")
-    st.code(model_path)
-    if step3_metrics:
-        st.write("Step3 metrics.json:")
-        st.json(step3_metrics)
+st.success("Artifacts loaded successfully ✅")
 
-# -----------------------------
-# User split settings (by target_date)
-# -----------------------------
-st.subheader("Split ranges (by target_date)")
+# --------------------------------------------------
+# Date-based split
+# --------------------------------------------------
+
+st.subheader("Date-based evaluation split")
 
 c1, c2, c3 = st.columns(3)
 with c1:
-    train_start = st.text_input("Train start", value="2016-01-01")
-    train_end   = st.text_input("Train end",   value="2022-12-31")
+    train_start = st.text_input("Train start", "2016-01-01")
+    train_end = st.text_input("Train end", "2022-12-31")
 with c2:
-    val_start   = st.text_input("Val start",   value="2023-01-01")
-    val_end     = st.text_input("Val end",     value="2023-12-31")
+    val_start = st.text_input("Val start", "2023-01-01")
+    val_end = st.text_input("Val end", "2023-12-31")
 with c3:
-    test_start  = st.text_input("Test start",  value="2024-01-01")
-    test_end    = st.text_input("Test end",    value="2025-12-31")
+    test_start = st.text_input("Test start", "2024-01-01")
+    test_end = st.text_input("Test end", "2025-12-31")
 
-train_idx = split_by_date(meta_df, train_start, train_end)
-val_idx   = split_by_date(meta_df, val_start, val_end)
-test_idx  = split_by_date(meta_df, test_start, test_end)
+test_mask = split_by_date(meta_df, test_start, test_end)
 
-st.subheader("Dataset summary")
-cc1, cc2, cc3, cc4 = st.columns(4)
-with cc1:
-    st.metric("Samples", X.shape[0])
-with cc2:
-    st.metric("Timesteps", X.shape[1])
-with cc3:
-    st.metric("Features", X.shape[2])
-with cc4:
-    st.metric("Targets", y2.shape[1])
-
-st.subheader("Split counts")
-st.write({
-    "train": int(train_idx.sum()),
-    "val": int(val_idx.sum()),
-    "test": int(test_idx.sum())
-})
-
-if int(test_idx.sum()) == 0:
-    st.error("Test split has 0 samples — adjust date ranges.")
+if test_mask.sum() == 0:
+    st.error("Test split has 0 samples.")
     st.stop()
 
-# -----------------------------
-# Load model and predict on TEST (and VAL optionally)
-# -----------------------------
-try:
-    import tensorflow as tf
-    model = tf.keras.models.load_model(model_path)
-except Exception as e:
-    st.error("Failed to load model.keras")
-    st.exception(e)
-    st.stop()
+# --------------------------------------------------
+# Model + Scaling
+# --------------------------------------------------
 
-X_test = X[test_idx]
-y_test = y2[test_idx]
-meta_test = meta_df[test_idx].reset_index(drop=True)
+import tensorflow as tf
+model = tf.keras.models.load_model(model_path)
 
-with st.spinner("Predicting on TEST..."):
-    y_pred_test = model.predict(X_test, verbose=0)
+apply_scaling = st.checkbox("Apply saved scaler (recommended)", True)
 
-if y_pred_test.ndim == 1:
-    y_pred_test = y_pred_test.reshape(-1, 1)
+X_eval = X.copy()
+scaler_used = None
 
-if y_pred_test.shape[1] != y_test.shape[1]:
-    st.error(f"Prediction targets mismatch: y_pred={y_pred_test.shape}, y_true={y_test.shape}")
-    st.stop()
+if apply_scaling:
+    X_eval, scaler_used = apply_saved_scaler_if_exists(X_eval, scaler_path)
 
-# Optional VAL
-do_val = int(val_idx.sum()) > 0
-if do_val:
-    X_val = X[val_idx]
-    y_val = y2[val_idx]
-    with st.spinner("Predicting on VAL..."):
-        y_pred_val = model.predict(X_val, verbose=0)
-    if y_pred_val.ndim == 1:
-        y_pred_val = y_pred_val.reshape(-1, 1)
-else:
-    y_val = y_pred_val = None
+X_test = X_eval[test_mask]
+y_test = y[test_mask]
+meta_test = meta_df[test_mask].reset_index(drop=True)
 
-# -----------------------------
-# Metrics
-# -----------------------------
-st.subheader("Metrics — TEST set")
+# --------------------------------------------------
+# Prediction
+# --------------------------------------------------
 
-depth_df = metrics_by_depth(y_test, y_pred_test, target_names)
-st.write("### Per-target metrics")
+with st.spinner("Predicting..."):
+    y_pred = model.predict(X_test, verbose=0)
+
+if y_pred.ndim == 1:
+    y_pred = y_pred.reshape(-1, 1)
+
+# --------------------------------------------------
+# Global metrics
+# --------------------------------------------------
+
+st.subheader("Global metrics (TEST)")
+
+global_metrics = {
+    "MAE": mae(y_test, y_pred),
+    "RMSE": rmse(y_test, y_pred),
+    "R2": r2(y_test, y_pred),
+    "Bias": bias(y_test, y_pred),
+    "Relative_Error_%": rel_error_pct(y_test, y_pred),
+}
+
+st.json(global_metrics)
+
+# --------------------------------------------------
+# Per-depth metrics
+# --------------------------------------------------
+
+st.subheader("Per-target metrics")
+
+rows = []
+for i in range(y_test.shape[1]):
+    rows.append({
+        "target": target_names[i],
+        "MAE": mae(y_test[:, i], y_pred[:, i]),
+        "RMSE": rmse(y_test[:, i], y_pred[:, i]),
+        "R2": r2(y_test[:, i], y_pred[:, i]),
+        "Bias": bias(y_test[:, i], y_pred[:, i]),
+    })
+
+depth_df = pd.DataFrame(rows)
 st.dataframe(depth_df, use_container_width=True)
 
-station_df = metrics_by_station(meta_test, y_test, y_pred_test, target_names)
-st.write("### Per-station metrics (mean across targets)")
+# --------------------------------------------------
+# Baseline comparison
+# --------------------------------------------------
+
+st.subheader("Naive persistence baseline comparison")
+
+baseline_pred = naive_persistence_baseline(X_test, y_test.shape[1])
+
+baseline_metrics = {
+    "Baseline_MAE": mae(y_test, baseline_pred),
+    "Baseline_RMSE": rmse(y_test, baseline_pred),
+    "Baseline_R2": r2(y_test, baseline_pred),
+}
+
+st.json(baseline_metrics)
+
+# --------------------------------------------------
+# Seasonal / monthly breakdown
+# --------------------------------------------------
+
+st.subheader("Monthly breakdown (TEST)")
+
+meta_test["month"] = meta_test["target_date"].dt.month
+
+month_rows = []
+for m in sorted(meta_test["month"].dropna().unique()):
+    idx = meta_test["month"] == m
+    month_rows.append({
+        "month": int(m),
+        "MAE": mae(y_test[idx], y_pred[idx]),
+        "RMSE": rmse(y_test[idx], y_pred[idx]),
+        "R2": r2(y_test[idx], y_pred[idx]),
+    })
+
+month_df = pd.DataFrame(month_rows)
+st.dataframe(month_df, use_container_width=True)
+
+# --------------------------------------------------
+# Error distribution
+# --------------------------------------------------
+
+st.subheader("Error distribution")
+
+errors = (y_pred - y_test).flatten()
+
+fig = plt.figure()
+plt.hist(errors, bins=40)
+plt.title("Signed error distribution")
+st.pyplot(fig)
+
+# --------------------------------------------------
+# Worst stations
+# --------------------------------------------------
+
+st.subheader("Worst stations (by RMSE)")
+
+station_rows = []
+for stn, idx in meta_test.groupby("station").groups.items():
+    idx = np.array(list(idx))
+    station_rows.append({
+        "station": stn,
+        "RMSE": rmse(y_test[idx], y_pred[idx]),
+        "MAE": mae(y_test[idx], y_pred[idx]),
+    })
+
+station_df = pd.DataFrame(station_rows).sort_values("RMSE", ascending=False)
 st.dataframe(station_df, use_container_width=True)
 
-# Error distribution
-st.subheader("Error distribution (TEST)")
-errors = (y_pred_test - y_test)
-abs_errors = np.abs(errors)
+# --------------------------------------------------
+# Export
+# --------------------------------------------------
 
-st.pyplot(plot_error_hist(errors.flatten(), "Signed errors (all targets pooled)"))
-st.pyplot(plot_error_hist(abs_errors.flatten(), "Absolute errors (all targets pooled)"))
-
-# True vs Pred plots
-st.subheader("True vs Pred (TEST, first samples)")
-max_points = st.slider("Max points per plot", 100, 3000, 600, 100)
-figs = plot_true_vs_pred(y_test, y_pred_test, target_names, max_points=max_points)
-for fig in figs:
-    st.pyplot(fig)
-
-# Worst stations
-st.subheader("Worst stations (highest RMSE_mean)")
-st.dataframe(station_df.head(15), use_container_width=True)
-
-# -----------------------------
-# Export to outputs/step5
-# -----------------------------
-st.subheader("Export")
-
-export_to_disk = st.checkbox("Export CSV metrics to outputs/step5/", value=True)
-
-if export_to_disk:
-    depth_path = os.path.join(OUT5, "metrics_by_depth_test.csv")
-    station_path = os.path.join(OUT5, "metrics_by_station_test.csv")
-    summary_path = os.path.join(OUT5, "step5_summary.json")
-
-    depth_df.to_csv(depth_path, index=False)
-    station_df.to_csv(station_path, index=False)
+if st.button("Export results to outputs/step5/"):
+    depth_df.to_csv(os.path.join(OUT5, "metrics_by_depth_test.csv"), index=False)
+    station_df.to_csv(os.path.join(OUT5, "metrics_by_station_test.csv"), index=False)
+    month_df.to_csv(os.path.join(OUT5, "metrics_by_month_test.csv"), index=False)
 
     summary = {
-        "paths": {
-            "X": x_path,
-            "y": y_path,
-            "meta": meta_path,
-            "model": model_path,
-        },
-        "splits": {
-            "train": {"start": train_start, "end": train_end, "n": int(train_idx.sum())},
-            "val":   {"start": val_start,   "end": val_end,   "n": int(val_idx.sum())},
-            "test":  {"start": test_start,  "end": test_end,  "n": int(test_idx.sum())},
-        },
-        "test_overall": {
-            "MAE_mean_over_targets": float(depth_df["MAE"].mean()),
-            "RMSE_mean_over_targets": float(depth_df["RMSE"].mean()),
-        }
+        "global_metrics": global_metrics,
+        "baseline_metrics": baseline_metrics,
+        "scaler_applied": scaler_used is not None,
+        "n_test_samples": int(test_mask.sum()),
     }
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
 
-    st.success("Exported ✅")
-    st.code("\n".join([depth_path, station_path, summary_path]))
+    with open(os.path.join(OUT5, "summary.json"), "w") as f:
+        json.dump(summary, f, indent=2)
+
+    st.success("Exported to outputs/step5/ ✅")

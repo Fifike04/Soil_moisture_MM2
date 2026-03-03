@@ -23,7 +23,7 @@
     }
   },
   "test_overall": {
-    "MAE_mean_over_targets": 3.4857723911603293,
-    "RMSE_mean_over_targets": 4.22395923945088
+    "MAE_mean_over_targets": 3.5154161055882773,
+    "RMSE_mean_over_targets": 4.151636053073289
   }
 }
