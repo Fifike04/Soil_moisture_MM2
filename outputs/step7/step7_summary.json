@@ -4,15 +4,14 @@
     "y": "outputs/step2/y.npy",
     "meta": "outputs/step2/meta.csv",
     "config": "outputs/step2/config.json",
-    "model": "outputs/step3/model.keras",
-    "x_scaler": "outputs/step3/x_scaler.json"
+    "model": "outputs/step3/model.keras"
   },
   "test_range": {
     "start": "2024-01-01",
     "end": "2025-12-31",
-    "n": 6291
+    "n": 10
   },
-  "exports": {
+  "outputs": {
     "monthly": "outputs/step7/monthly_pooled_metrics.csv",
     "seasonal": "outputs/step7/seasonal_pooled_metrics.csv",
     "per_target_by_season": "outputs/step7/per_target_by_season.csv",
