@@ -14,7 +14,7 @@
       "_SM60",
       "_SM75"
     ],
-    "n_stations_predicted": 11
+    "n_stations_predicted": 10
   },
   "outputs": {
     "csv": "outputs/step4/predictions_step4.csv",

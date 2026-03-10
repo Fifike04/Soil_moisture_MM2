@@ -1,6 +1,5 @@
 station,rows,possible_windows,kept_windows,dropped_target_nan,dropped_nan_ratio,reason
 jakabszallas,1421,1410,0,0,1410,all windows dropped
-szod,1454,1443,0,0,1443,all windows dropped
 sandorfalva,2128,2117,0,0,2117,all windows dropped
 izsak,2146,2135,0,0,2135,all windows dropped
 csolyospalos,2212,2201,0,0,2201,all windows dropped
