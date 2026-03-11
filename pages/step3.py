@@ -22,6 +22,7 @@ CONFIG_PATH = os.path.join(STEP2_DIR, "config.json")
 MODEL_PATH = os.path.join(STEP3_DIR, "model.keras")
 HISTORY_PATH = os.path.join(STEP3_DIR, "history.json")
 METRICS_PATH = os.path.join(STEP3_DIR, "metrics.json")
+X_SCALER_PATH = os.path.join(STEP3_DIR, "x_scaler.json")
 
 # --------------------------------------------------
 # Helpers
@@ -31,6 +32,7 @@ def require_file(path: str, label: str):
         st.error(f"Missing required file: {label}")
         st.code(path)
         st.stop()
+
 
 def load_step2_outputs():
     require_file(X_PATH, "Step2 X.npy")
@@ -47,6 +49,7 @@ def load_step2_outputs():
 
     return X, y, meta_df, config
 
+
 def make_json_safe(obj):
     if isinstance(obj, dict):
         return {str(k): make_json_safe(v) for k, v in obj.items()}
@@ -57,6 +60,35 @@ def make_json_safe(obj):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     return obj
+
+
+def flatten_X(X: np.ndarray) -> np.ndarray:
+    n, t, f = X.shape
+    return X.reshape(n * t, f)
+
+
+def unflatten_X(X_flat: np.ndarray, n: int, t: int) -> np.ndarray:
+    f = X_flat.shape[1]
+    return X_flat.reshape(n, t, f)
+
+
+def fit_x_scaler_from_train(X_train: np.ndarray):
+    """
+    Standardize X using TRAIN only.
+    Saved as mean/std so later steps can reuse the exact same scaling.
+    """
+    Xf = flatten_X(X_train).astype(np.float32)
+    mu = np.nanmean(Xf, axis=0)
+    sd = np.nanstd(Xf, axis=0)
+    sd = np.where(sd == 0, 1.0, sd)
+    return mu.astype(np.float32), sd.astype(np.float32)
+
+
+def apply_x_scaler(X: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
+    Xf = flatten_X(X).astype(np.float32)
+    Xf = (Xf - mu) / sd
+    return unflatten_X(Xf, X.shape[0], X.shape[1]).astype(np.float32)
+
 
 # --------------------------------------------------
 # Load Step2 outputs
@@ -96,6 +128,7 @@ st.write({
     "y_shape": tuple(y.shape),
     "meta_rows": int(len(meta_df)),
     "targets": step2_config.get("target_cols", []),
+    "n_features": int(X.shape[2]),
 })
 with st.expander("Step2 config.json"):
     st.json(step2_config)
@@ -107,7 +140,7 @@ st.subheader("2) Split settings")
 
 split_mode = st.radio(
     "Split method",
-    ["Chronological ratio split", "Date-based split"],
+    ["Date-based split", "Chronological ratio split"],
     index=0
 )
 
@@ -179,27 +212,52 @@ st.write("Split summary:")
 st.json(split_info)
 
 # --------------------------------------------------
+# Scaling settings
+# --------------------------------------------------
+st.subheader("3) Input scaling")
+
+do_x_scaling = st.checkbox("Standardize X using TRAIN only (recommended)", value=True)
+
+if do_x_scaling:
+    mu, sd = fit_x_scaler_from_train(X_train)
+    X_train_scaled = apply_x_scaler(X_train, mu, sd)
+    X_val_scaled = apply_x_scaler(X_val, mu, sd)
+    X_test_scaled = apply_x_scaler(X_test, mu, sd)
+
+    scaler_preview = pd.DataFrame({
+        "feature_index": np.arange(min(20, len(mu))),
+        "mean": mu[:20],
+        "std": sd[:20],
+    })
+    with st.expander("Scaler preview (first 20 features)"):
+        st.dataframe(scaler_preview, use_container_width=True)
+else:
+    X_train_scaled, X_val_scaled, X_test_scaled = X_train, X_val, X_test
+    mu, sd = None, None
+
+# --------------------------------------------------
 # Model settings
 # --------------------------------------------------
-st.subheader("3) Model settings")
+st.subheader("4) Model settings")
 
 c1, c2, c3, c4 = st.columns(4)
 with c1:
-    units = st.number_input("LSTM units", min_value=8, max_value=512, value=64, step=8)
+    units1 = st.number_input("LSTM units (layer 1)", min_value=8, max_value=512, value=64, step=8)
 with c2:
-    dropout = st.slider("Dropout", 0.0, 0.7, 0.2, 0.05)
+    units2 = st.number_input("LSTM units (layer 2, 0 = off)", min_value=0, max_value=512, value=32, step=8)
 with c3:
-    lr = st.select_slider("Learning rate", options=[1e-4, 3e-4, 1e-3, 3e-3, 1e-2], value=1e-3)
+    dropout = st.slider("Dropout", 0.0, 0.7, 0.2, 0.05)
 with c4:
-    batch_size = st.selectbox("Batch size", options=[16, 32, 64, 128, 256], index=1)
+    batch_size = st.selectbox("Batch size", options=[16, 32, 64, 128, 256], index=2)
 
+lr = st.select_slider("Learning rate", options=[1e-4, 3e-4, 1e-3, 3e-3, 1e-2], value=1e-3)
 epochs = st.number_input("Epochs", min_value=1, max_value=500, value=30, step=1)
 patience = st.number_input("EarlyStopping patience", min_value=2, max_value=50, value=8, step=1)
 
 # --------------------------------------------------
 # Train
 # --------------------------------------------------
-st.subheader("4) Train model")
+st.subheader("5) Train model")
 
 if st.button("Train LSTM + save to outputs/step3"):
     try:
@@ -207,13 +265,24 @@ if st.button("Train LSTM + save to outputs/step3"):
         from tensorflow.keras import layers
 
         tf.keras.backend.clear_session()
+        tf.random.set_seed(42)
+        np.random.seed(42)
 
-        model = tf.keras.Sequential([
-            layers.Input(shape=(X_train.shape[1], X_train.shape[2])),
-            layers.LSTM(int(units), return_sequences=False),
+        model_layers = [
+            layers.Input(shape=(X_train_scaled.shape[1], X_train_scaled.shape[2])),
+            layers.LSTM(int(units1), return_sequences=(int(units2) > 0)),
             layers.Dropout(float(dropout)),
-            layers.Dense(y_train.shape[1]),
-        ])
+        ]
+
+        if int(units2) > 0:
+            model_layers.extend([
+                layers.LSTM(int(units2), return_sequences=False),
+                layers.Dropout(float(dropout)),
+            ])
+
+        model_layers.append(layers.Dense(y_train.shape[1]))
+
+        model = tf.keras.Sequential(model_layers)
 
         model.compile(
             optimizer=tf.keras.optimizers.Adam(learning_rate=float(lr)),
@@ -231,8 +300,8 @@ if st.button("Train LSTM + save to outputs/step3"):
 
         with st.spinner("Training model..."):
             history = model.fit(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
+                X_train_scaled, y_train,
+                validation_data=(X_val_scaled, y_val),
                 epochs=int(epochs),
                 batch_size=int(batch_size),
                 verbose=0,
@@ -240,41 +309,52 @@ if st.button("Train LSTM + save to outputs/step3"):
             )
 
         # Evaluate
-        test_res = model.evaluate(X_test, y_test, verbose=0)
+        test_res = model.evaluate(X_test_scaled, y_test, verbose=0)
         test_mse = float(test_res[0])
         test_mae = float(test_res[1]) if len(test_res) > 1 else None
 
-        # Predict sample preview
-        preds = model.predict(X_test, verbose=0)
+        preds = model.predict(X_test_scaled, verbose=0)
 
         st.success("Training finished ✅")
         st.write(f"Test MSE: {test_mse:.6f}")
         if test_mae is not None:
             st.write(f"Test MAE: {test_mae:.6f}")
 
-        st.write("Prediction preview (first 10 rows):")
+        # preview first target only for cleaner display
+        preview_n = min(10, len(y_test))
         preview_df = pd.DataFrame({
-            "y_true": y_test[:10].reshape(-1).tolist()[:10],
-            "y_pred": preds[:10].reshape(-1).tolist()[:10],
+            "y_true_first_target": y_test[:preview_n, 0].tolist(),
+            "y_pred_first_target": preds[:preview_n, 0].tolist(),
         })
+        st.write("Prediction preview (first target, first rows):")
         st.dataframe(preview_df, use_container_width=True)
 
-        # Save outputs
+        # Save model
         model.save(MODEL_PATH)
 
         with open(HISTORY_PATH, "w", encoding="utf-8") as f:
             json.dump(make_json_safe(history.history), f, ensure_ascii=False, indent=2)
 
+        if do_x_scaling and mu is not None and sd is not None:
+            scaler_payload = {
+                "mean": mu.tolist(),
+                "std": sd.tolist(),
+            }
+            with open(X_SCALER_PATH, "w", encoding="utf-8") as f:
+                json.dump(make_json_safe(scaler_payload), f, ensure_ascii=False, indent=2)
+
         metrics = {
             "test_mse": test_mse,
             "test_mae": test_mae,
-            "n_train": int(X_train.shape[0]),
-            "n_val": int(X_val.shape[0]),
-            "n_test": int(X_test.shape[0]),
+            "n_train": int(X_train_scaled.shape[0]),
+            "n_val": int(X_val_scaled.shape[0]),
+            "n_test": int(X_test_scaled.shape[0]),
             "split_info": split_info,
+            "input_scaling": bool(do_x_scaling),
             "step2_config": step2_config,
             "model_config": {
-                "lstm_units": int(units),
+                "lstm_units_1": int(units1),
+                "lstm_units_2": int(units2),
                 "dropout": float(dropout),
                 "learning_rate": float(lr),
                 "batch_size": int(batch_size),
@@ -286,7 +366,6 @@ if st.button("Train LSTM + save to outputs/step3"):
         with open(METRICS_PATH, "w", encoding="utf-8") as f:
             json.dump(make_json_safe(metrics), f, ensure_ascii=False, indent=2)
 
-        # Optional session_state
         st.session_state["step3_metrics"] = metrics
         st.session_state["step3_history"] = history.history
 

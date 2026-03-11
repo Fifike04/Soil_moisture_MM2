@@ -22,6 +22,7 @@ META_PATH = os.path.join(OUT2, "meta.csv")
 CFG_PATH = os.path.join(OUT2, "config.json")
 
 MODEL_PATH = os.path.join(OUT3, "model.keras")
+X_SCALER_PATH = os.path.join(OUT3, "x_scaler.json")
 
 DEPTH_OUT = os.path.join(OUT5, "metrics_by_depth_test.csv")
 STATION_OUT = os.path.join(OUT5, "metrics_by_station_test.csv")
@@ -36,15 +37,19 @@ def require_file(path: str, label: str):
         st.code(path)
         st.stop()
 
+
 def mae(y_true, y_pred):
     return float(np.mean(np.abs(y_true - y_pred)))
+
 
 def mse(y_true, y_pred):
     d = y_true - y_pred
     return float(np.mean(d * d))
 
+
 def rmse(y_true, y_pred):
     return float(np.sqrt(mse(y_true, y_pred)))
+
 
 def r2_score_numpy(y_true, y_pred):
     ss_res = float(np.sum((y_true - y_pred) ** 2))
@@ -53,9 +58,19 @@ def r2_score_numpy(y_true, y_pred):
         return float("nan")
     return float(1.0 - ss_res / ss_tot)
 
+
+def bias(y_true, y_pred):
+    return float(np.mean(y_pred - y_true))
+
+
+def rel_error_pct(y_true, y_pred):
+    return float(np.mean(np.abs((y_pred - y_true) / (y_true + 1e-8))) * 100.0)
+
+
 def split_by_date(meta_df: pd.DataFrame, start: str, end: str) -> np.ndarray:
     d = pd.to_datetime(meta_df["target_date"], errors="coerce")
     return ((d >= pd.to_datetime(start)) & (d <= pd.to_datetime(end))).to_numpy()
+
 
 def metrics_by_depth(y_true_2d: np.ndarray, y_pred_2d: np.ndarray, target_names: list[str]) -> pd.DataFrame:
     rows = []
@@ -67,10 +82,13 @@ def metrics_by_depth(y_true_2d: np.ndarray, y_pred_2d: np.ndarray, target_names:
             "MAE": mae(yt, yp),
             "RMSE": rmse(yt, yp),
             "R2": r2_score_numpy(yt, yp),
+            "Bias": bias(yt, yp),
+            "Relative_Error_%": rel_error_pct(yt, yp),
         })
     return pd.DataFrame(rows)
 
-def metrics_by_station(meta_df: pd.DataFrame, y_true_2d: np.ndarray, y_pred_2d: np.ndarray, target_names: list[str]) -> pd.DataFrame:
+
+def metrics_by_station(meta_df: pd.DataFrame, y_true_2d: np.ndarray, y_pred_2d: np.ndarray) -> pd.DataFrame:
     if "station" not in meta_df.columns:
         return pd.DataFrame({"error": ["meta.csv has no 'station' column"]})
 
@@ -82,18 +100,22 @@ def metrics_by_station(meta_df: pd.DataFrame, y_true_2d: np.ndarray, y_pred_2d: 
 
         maes = []
         rmses = []
+        r2s = []
         for j in range(yt.shape[1]):
             maes.append(mae(yt[:, j], yp[:, j]))
             rmses.append(rmse(yt[:, j], yp[:, j]))
+            r2s.append(r2_score_numpy(yt[:, j], yp[:, j]))
 
         rows.append({
             "station": stn,
             "n_samples": int(len(idx)),
             "MAE_mean": float(np.mean(maes)),
             "RMSE_mean": float(np.mean(rmses)),
+            "R2_mean": float(np.nanmean(r2s)),
         })
 
     return pd.DataFrame(rows).sort_values("RMSE_mean", ascending=False).reset_index(drop=True)
+
 
 def plot_error_hist(errors_1d: np.ndarray, title: str):
     fig = plt.figure()
@@ -102,6 +124,7 @@ def plot_error_hist(errors_1d: np.ndarray, title: str):
     plt.xlabel("Error")
     plt.ylabel("Count")
     return fig
+
 
 def plot_true_vs_pred(y_true_2d: np.ndarray, y_pred_2d: np.ndarray, target_names: list[str], max_points=600):
     figs = []
@@ -121,6 +144,37 @@ def plot_true_vs_pred(y_true_2d: np.ndarray, y_pred_2d: np.ndarray, target_names
 
     return figs
 
+
+def flatten_X(X: np.ndarray) -> np.ndarray:
+    n, t, f = X.shape
+    return X.reshape(n * t, f)
+
+
+def unflatten_X(X_flat: np.ndarray, n: int, t: int) -> np.ndarray:
+    f = X_flat.shape[1]
+    return X_flat.reshape(n, t, f)
+
+
+def apply_x_scaler(X: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
+    Xf = flatten_X(X).astype(np.float32)
+    Xf = (Xf - mu) / sd
+    return unflatten_X(Xf, X.shape[0], X.shape[1]).astype(np.float32)
+
+
+def load_x_scaler(path: str):
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            sc = json.load(f)
+        mu = np.asarray(sc["mean"], dtype=np.float32)
+        sd = np.asarray(sc["std"], dtype=np.float32)
+        sd = np.where(sd == 0, 1.0, sd).astype(np.float32)
+        return mu, sd
+    except Exception:
+        return None, None
+
+
 def make_json_safe(obj):
     if isinstance(obj, dict):
         return {str(k): make_json_safe(v) for k, v in obj.items()}
@@ -131,6 +185,7 @@ def make_json_safe(obj):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     return obj
+
 
 # --------------------------------------------------
 # Load Step2 + Step3 outputs
@@ -188,16 +243,37 @@ st.write({
     "X_shape": tuple(X.shape),
     "y_shape": tuple(y.shape),
     "meta_rows": int(len(meta_df)),
-    "targets": target_names
+    "targets": target_names,
+    "n_features": int(X.shape[2]),
 })
 
 with st.expander("Step2 config"):
     st.json(step2_cfg)
 
 # --------------------------------------------------
-# Test date range
+# Load scaler
 # --------------------------------------------------
-st.subheader("2) Select evaluation range")
+st.subheader("2) Load Step3 input scaler")
+
+mu, sd = load_x_scaler(X_SCALER_PATH)
+if mu is not None and sd is not None:
+    st.success("Step3 x_scaler.json loaded ✅")
+    st.write(f"Scaler feature dimension: {len(mu)}")
+else:
+    st.warning("No valid x_scaler.json found. Diagnostics will run without scaling.")
+    mu, sd = None, None
+
+if mu is not None and len(mu) != X.shape[2]:
+    st.warning(
+        f"Scaler dimension ({len(mu)}) does not match X feature dimension ({X.shape[2]}). "
+        "Scaling will be skipped."
+    )
+    mu, sd = None, None
+
+# --------------------------------------------------
+# Evaluation range
+# --------------------------------------------------
+st.subheader("3) Select evaluation range")
 
 c1, c2, c3 = st.columns(3)
 with c1:
@@ -231,14 +307,21 @@ if int(test_idx.sum()) == 0:
 # --------------------------------------------------
 # Predict on test set
 # --------------------------------------------------
-st.subheader("3) Run diagnostics on test set")
+st.subheader("4) Run diagnostics on test set")
 
 X_test = X[test_idx]
 y_test = y[test_idx]
 meta_test = meta_df.loc[test_idx].reset_index(drop=True)
 
+if mu is not None and sd is not None:
+    X_test_scaled = apply_x_scaler(X_test, mu, sd)
+    st.info("Applied Step3 scaling to X_test.")
+else:
+    X_test_scaled = X_test
+    st.info("No scaling applied to X_test.")
+
 with st.spinner("Predicting on test set..."):
-    y_pred_test = model.predict(X_test, verbose=0)
+    y_pred_test = model.predict(X_test_scaled, verbose=0)
 
 if y_pred_test.ndim == 1:
     y_pred_test = y_pred_test.reshape(-1, 1)
@@ -250,8 +333,21 @@ if y_pred_test.shape[1] != y_test.shape[1]:
 # --------------------------------------------------
 # Metrics
 # --------------------------------------------------
+st.subheader("5) Metrics")
+
 depth_df = metrics_by_depth(y_test, y_pred_test, target_names)
-station_df = metrics_by_station(meta_test, y_test, y_pred_test, target_names)
+station_df = metrics_by_station(meta_test, y_test, y_pred_test)
+
+global_summary = {
+    "MAE_mean_over_targets": float(depth_df["MAE"].mean()),
+    "RMSE_mean_over_targets": float(depth_df["RMSE"].mean()),
+    "R2_mean_over_targets": float(depth_df["R2"].mean()),
+    "Bias_mean_over_targets": float(depth_df["Bias"].mean()),
+    "Relative_Error_%_mean_over_targets": float(depth_df["Relative_Error_%"].mean()),
+}
+
+st.write("### Global summary")
+st.json(global_summary)
 
 st.write("### Per-target metrics")
 st.dataframe(depth_df, use_container_width=True)
@@ -262,7 +358,7 @@ st.dataframe(station_df, use_container_width=True)
 # --------------------------------------------------
 # Plots
 # --------------------------------------------------
-st.subheader("4) Diagnostic plots")
+st.subheader("6) Diagnostic plots")
 
 errors = y_pred_test - y_test
 abs_errors = np.abs(errors)
@@ -286,7 +382,7 @@ st.dataframe(station_df.head(15), use_container_width=True)
 # --------------------------------------------------
 # Save outputs
 # --------------------------------------------------
-st.subheader("5) Save outputs")
+st.subheader("7) Save outputs")
 
 if st.button("Save diagnostics to outputs/step5"):
     try:
@@ -300,16 +396,14 @@ if st.button("Save diagnostics to outputs/step5"):
                 "meta": META_PATH,
                 "config": CFG_PATH,
                 "model": MODEL_PATH,
+                "x_scaler": X_SCALER_PATH if mu is not None else None,
             },
             "split": {
                 "train": {"start": train_start, "end": train_end, "n": int(train_idx.sum())},
                 "val": {"start": val_start, "end": val_end, "n": int(val_idx.sum())},
                 "test": {"start": test_start, "end": test_end, "n": int(test_idx.sum())},
             },
-            "test_overall": {
-                "MAE_mean_over_targets": float(depth_df["MAE"].mean()),
-                "RMSE_mean_over_targets": float(depth_df["RMSE"].mean()),
-            },
+            "test_overall": global_summary,
             "outputs": {
                 "metrics_by_depth": DEPTH_OUT,
                 "metrics_by_station": STATION_OUT,

@@ -35,22 +35,44 @@ def require_file(path: str, label: str):
         st.code(path)
         st.stop()
 
+
 def rmse(y_true, y_pred):
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
-def build_lstm_model(input_timesteps, input_features, output_dim,
-                     lstm_units1, lstm_units2, dropout, dense_units, learning_rate):
+
+def bias(y_true, y_pred):
+    return float(np.mean(y_pred - y_true))
+
+
+def rel_error_pct(y_true, y_pred):
+    return float(np.mean(np.abs((y_pred - y_true) / (y_true + 1e-8))) * 100.0)
+
+
+def build_lstm_model(
+    input_timesteps,
+    input_features,
+    output_dim,
+    lstm_units1,
+    lstm_units2,
+    dropout,
+    dense_units,
+    learning_rate,
+):
     model = models.Sequential()
     model.add(layers.Input(shape=(input_timesteps, input_features)))
     model.add(layers.LSTM(lstm_units1, return_sequences=(lstm_units2 > 0)))
+
     if dropout > 0:
         model.add(layers.Dropout(dropout))
+
     if lstm_units2 > 0:
         model.add(layers.LSTM(lstm_units2))
         if dropout > 0:
             model.add(layers.Dropout(dropout))
+
     if dense_units > 0:
         model.add(layers.Dense(dense_units, activation="relu"))
+
     model.add(layers.Dense(output_dim, activation="linear"))
     model.compile(
         optimizer=optimizers.Adam(learning_rate=learning_rate),
@@ -59,13 +81,16 @@ def build_lstm_model(input_timesteps, input_features, output_dim,
     )
     return model
 
-def flatten_X(X):
-    N, T, F = X.shape
-    return X.reshape(N * T, F)
 
-def unflatten_X(X_flat, N, T):
-    F = X_flat.shape[1]
-    return X_flat.reshape(N, T, F)
+def flatten_X(X):
+    n, t, f = X.shape
+    return X.reshape(n * t, f)
+
+
+def unflatten_X(X_flat, n, t):
+    f = X_flat.shape[1]
+    return X_flat.reshape(n, t, f)
+
 
 def make_scaler(name: str):
     if name == "StandardScaler":
@@ -74,11 +99,12 @@ def make_scaler(name: str):
         return MinMaxScaler()
     return None
 
+
 def fit_transform_scalers(X_train, X_val, X_test, y_train, y_val, y_test, x_scaler_type, y_scaler_type):
     x_scaler = make_scaler(x_scaler_type)
     y_scaler = make_scaler(y_scaler_type)
 
-    # X scaling
+    # X scaling (fit TRAIN only)
     if x_scaler is not None:
         x_scaler.fit(flatten_X(X_train))
         X_train_s = unflatten_X(x_scaler.transform(flatten_X(X_train)), X_train.shape[0], X_train.shape[1])
@@ -87,7 +113,7 @@ def fit_transform_scalers(X_train, X_val, X_test, y_train, y_val, y_test, x_scal
     else:
         X_train_s, X_val_s, X_test_s = X_train, X_val, X_test
 
-    # y scaling
+    # y scaling (fit TRAIN only)
     if y_scaler is not None:
         y_scaler.fit(y_train)
         y_train_s = y_scaler.transform(y_train)
@@ -96,12 +122,14 @@ def fit_transform_scalers(X_train, X_val, X_test, y_train, y_val, y_test, x_scal
     else:
         y_train_s, y_val_s, y_test_s = y_train, y_val, y_test
 
-    return (X_train_s, X_val_s, X_test_s, y_train_s, y_val_s, y_test_s, x_scaler, y_scaler)
+    return X_train_s, X_val_s, X_test_s, y_train_s, y_val_s, y_test_s, x_scaler, y_scaler
+
 
 def inverse_y(y_scaled, y_scaler):
     if y_scaler is None:
         return y_scaled
     return y_scaler.inverse_transform(y_scaled)
+
 
 def metrics_per_target(y_true, y_pred, target_names):
     rows = []
@@ -112,29 +140,39 @@ def metrics_per_target(y_true, y_pred, target_names):
             "target": target_names[j] if j < len(target_names) else f"target{j}",
             "MAE": float(mean_absolute_error(yt, yp)),
             "RMSE": float(np.sqrt(mean_squared_error(yt, yp))),
-            "R2": float(r2_score(yt, yp))
+            "R2": float(r2_score(yt, yp)),
+            "Bias": bias(yt, yp),
+            "Relative_Error_%": rel_error_pct(yt, yp),
         })
     return pd.DataFrame(rows)
 
-def naive_baseline_last_step(X_test, target_dim, feature_names, target_names):
+
+def naive_baseline_last_step(X_test, feature_names, target_names):
+    """
+    Baseline = predict target(t) ~= same variable at last timestep of input window.
+    Only works if target cols are present among final_feature_cols.
+    """
     idxs = []
     for t in target_names:
         if t in feature_names:
             idxs.append(feature_names.index(t))
         else:
             return None
+
     last_step = X_test[:, -1, :]
-    y_pred = last_step[:, idxs]
-    return y_pred
+    return last_step[:, idxs]
+
 
 def date_mask(meta_df, start, end):
     d = pd.to_datetime(meta_df["target_date"], errors="coerce")
     return ((d >= pd.to_datetime(start)) & (d <= pd.to_datetime(end))).to_numpy()
 
+
 def plot_true_vs_pred(y_true, y_pred, target_names, max_points=400):
     figs = []
     n = min(len(y_true), max_points)
     x = np.arange(n)
+
     for j in range(y_true.shape[1]):
         fig = plt.figure()
         plt.plot(x, y_true[:n, j], label="true")
@@ -144,7 +182,9 @@ def plot_true_vs_pred(y_true, y_pred, target_names, max_points=400):
         plt.ylabel("Value")
         plt.legend()
         figs.append(fig)
+
     return figs
+
 
 def make_json_safe(obj):
     if isinstance(obj, dict):
@@ -157,8 +197,9 @@ def make_json_safe(obj):
         return obj.tolist()
     return obj
 
+
 # --------------------------------------------------
-# Load from outputs/step2
+# Load Step2 outputs
 # --------------------------------------------------
 st.subheader("1) Load Step2 outputs")
 
@@ -221,7 +262,11 @@ with st.sidebar:
     st.header("Holdout station")
     unique_stations = sorted(meta_df["station"].dropna().unique().tolist())
     default_station = "csengele" if "csengele" in unique_stations else (unique_stations[0] if unique_stations else "")
-    holdout_station = st.selectbox("Holdout station", options=unique_stations, index=unique_stations.index(default_station) if default_station in unique_stations else 0)
+    holdout_station = st.selectbox(
+        "Holdout station",
+        options=unique_stations,
+        index=unique_stations.index(default_station) if default_station in unique_stations else 0
+    )
 
     st.divider()
     st.header("Date ranges")
@@ -237,7 +282,7 @@ with st.sidebar:
     st.divider()
     st.header("Scaling")
     x_scaler_type = st.selectbox("X scaler", ["StandardScaler", "MinMaxScaler", "No scaling"], index=0)
-    y_scaler_type = st.selectbox("y scaler", ["StandardScaler", "MinMaxScaler", "No scaling"], index=0)
+    y_scaler_type = st.selectbox("y scaler", ["No scaling", "StandardScaler", "MinMaxScaler"], index=0)
 
     st.divider()
     st.header("Model hyperparameters")
@@ -283,7 +328,9 @@ if int(train_mask.sum()) == 0 or int(val_mask.sum()) == 0 or int(test_mask.sum()
     if d.notna().any():
         st.info(f"Available target_date range: {d.min()} — {d.max()}")
     st.write("Station counts:")
-    st.dataframe(meta_df["station"].value_counts().reset_index().rename(columns={"index": "station", "station": "count"}), use_container_width=True)
+    station_counts = meta_df["station"].value_counts().reset_index()
+    station_counts.columns = ["station", "count"]
+    st.dataframe(station_counts, use_container_width=True)
     st.stop()
 
 X_train, y_train = X[train_mask], y[train_mask]
@@ -296,12 +343,15 @@ meta_test = meta_df[test_mask].reset_index(drop=True)
 # --------------------------------------------------
 st.subheader("3) Scaling")
 
-(X_train_s, X_val_s, X_test_s,
- y_train_s, y_val_s, y_test_s,
- x_scaler, y_scaler) = fit_transform_scalers(
+(
+    X_train_s, X_val_s, X_test_s,
+    y_train_s, y_val_s, y_test_s,
+    x_scaler, y_scaler
+) = fit_transform_scalers(
     X_train, X_val, X_test,
     y_train, y_val, y_test,
-    x_scaler_type, y_scaler_type
+    x_scaler_type,
+    y_scaler_type if y_scaler_type != "No scaling" else "No scaling",
 )
 
 st.success("Scaling prepared ✅")
@@ -312,6 +362,7 @@ st.success("Scaling prepared ✅")
 st.subheader("4) Train on non-holdout stations and test on holdout")
 
 if st.button("Train & evaluate holdout"):
+    tf.keras.backend.clear_session()
     tf.random.set_seed(42)
     np.random.seed(42)
 
@@ -353,11 +404,21 @@ if st.button("Train & evaluate holdout"):
     st.write("### Holdout test metrics (per target)")
     st.dataframe(df_depth, use_container_width=True)
 
+    global_summary = {
+        "MAE_mean_over_targets": float(df_depth["MAE"].mean()),
+        "RMSE_mean_over_targets": float(df_depth["RMSE"].mean()),
+        "R2_mean_over_targets": float(df_depth["R2"].mean()),
+        "Bias_mean_over_targets": float(df_depth["Bias"].mean()),
+        "Relative_Error_%_mean_over_targets": float(df_depth["Relative_Error_%"].mean()),
+    }
+    st.write("### Global summary")
+    st.json(global_summary)
+
     # Baseline
     st.write("### Baseline comparison")
     baseline = None
     if feature_names:
-        baseline = naive_baseline_last_step(X_test, y_test.shape[1], feature_names, target_names)
+        baseline = naive_baseline_last_step(X_test, feature_names, target_names)
 
     if baseline is None:
         st.info("Naive baseline not available (targets are not present among features).")
@@ -412,6 +473,7 @@ if st.button("Train & evaluate holdout"):
                 "epochs": int(epochs),
                 "patience": int(patience),
             },
+            "test_overall": global_summary,
             "outputs": {
                 "metrics": out_metrics,
                 "compare": out_cmp,

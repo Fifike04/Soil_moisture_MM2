@@ -36,11 +36,14 @@ def require_file(path: str, label: str):
         st.code(path)
         st.stop()
 
+
 def now_run_id():
     return time.strftime("%Y%m%d_%H%M%S")
 
+
 def safe_mkdir(path: str):
     os.makedirs(path, exist_ok=True)
+
 
 def git_commit_hash():
     try:
@@ -52,13 +55,16 @@ def git_commit_hash():
     except Exception:
         return None
 
-def flatten_X(X):
-    N, T, F = X.shape
-    return X.reshape(N * T, F)
 
-def unflatten_X(X_flat, N, T):
-    F = X_flat.shape[1]
-    return X_flat.reshape(N, T, F)
+def flatten_X(X):
+    n, t, f = X.shape
+    return X.reshape(n * t, f)
+
+
+def unflatten_X(X_flat, n, t):
+    f = X_flat.shape[1]
+    return X_flat.reshape(n, t, f)
+
 
 def make_scaler(name: str):
     if name == "StandardScaler":
@@ -67,18 +73,23 @@ def make_scaler(name: str):
         return MinMaxScaler()
     return None
 
+
 def build_lstm_model(T, F, out_dim, units1, units2, dropout, dense_units, lr):
     model = models.Sequential()
     model.add(layers.Input(shape=(T, F)))
     model.add(layers.LSTM(units1, return_sequences=(units2 > 0)))
+
     if dropout > 0:
         model.add(layers.Dropout(dropout))
+
     if units2 > 0:
         model.add(layers.LSTM(units2))
         if dropout > 0:
             model.add(layers.Dropout(dropout))
+
     if dense_units > 0:
         model.add(layers.Dense(dense_units, activation="relu"))
+
     model.add(layers.Dense(out_dim, activation="linear"))
     model.compile(
         optimizer=optimizers.Adam(learning_rate=lr),
@@ -86,6 +97,7 @@ def build_lstm_model(T, F, out_dim, units1, units2, dropout, dense_units, lr):
         metrics=["mae"]
     )
     return model
+
 
 def plot_history(hist):
     fig = plt.figure()
@@ -96,6 +108,7 @@ def plot_history(hist):
     plt.ylabel("Loss (MSE)")
     plt.legend()
     return fig
+
 
 def plot_true_vs_pred(y_true, y_pred, target_names, max_points=600):
     figs = []
@@ -114,27 +127,44 @@ def plot_true_vs_pred(y_true, y_pred, target_names, max_points=600):
 
     return figs
 
+
 def split_by_date(meta_df, start, end):
     d = pd.to_datetime(meta_df["target_date"], errors="coerce")
     return ((d >= pd.to_datetime(start)) & (d <= pd.to_datetime(end))).to_numpy()
 
+
+def bias(y_true, y_pred):
+    return float(np.mean(y_pred - y_true))
+
+
+def rel_error_pct(y_true, y_pred):
+    return float(np.mean(np.abs((y_pred - y_true) / (y_true + 1e-8))) * 100.0)
+
+
 def per_target_metrics(y_true, y_pred, target_names):
     rows = []
     for j in range(y_true.shape[1]):
+        yt = y_true[:, j]
+        yp = y_pred[:, j]
         rows.append({
             "target": target_names[j] if j < len(target_names) else f"target{j}",
-            "MAE": float(mean_absolute_error(y_true[:, j], y_pred[:, j])),
-            "RMSE": float(np.sqrt(mean_squared_error(y_true[:, j], y_pred[:, j]))),
-            "R2": float(r2_score(y_true[:, j], y_pred[:, j]))
+            "MAE": float(mean_absolute_error(yt, yp)),
+            "RMSE": float(np.sqrt(mean_squared_error(yt, yp))),
+            "R2": float(r2_score(yt, yp)),
+            "Bias": bias(yt, yp),
+            "Relative_Error_%": rel_error_pct(yt, yp),
         })
     return pd.DataFrame(rows)
+
 
 def pooled_metrics(y_true, y_pred):
     err = y_pred - y_true
     return {
         "MAE_pooled": float(np.mean(np.abs(err))),
         "RMSE_pooled": float(np.sqrt(np.mean(err ** 2))),
+        "Bias_pooled": float(np.mean(err)),
     }
+
 
 def save_scalers_npz(path, x_scaler_type, y_scaler_type, x_scaler, y_scaler):
     np.savez(
@@ -155,6 +185,27 @@ def save_scalers_npz(path, x_scaler_type, y_scaler_type, x_scaler, y_scaler):
         y_data_range=getattr(y_scaler, "data_range_", None),
     )
 
+
+def save_x_scaler_json(path, x_scaler_type, x_scaler):
+    if x_scaler is None:
+        return
+    payload = {"scaler_type": x_scaler_type}
+
+    if x_scaler_type == "StandardScaler":
+        payload["mean"] = x_scaler.mean_.tolist()
+        payload["std"] = np.where(x_scaler.scale_ == 0, 1.0, x_scaler.scale_).tolist()
+    elif x_scaler_type == "MinMaxScaler":
+        # for consistency with earlier steps, save raw sklearn attrs too
+        payload["min"] = x_scaler.min_.tolist()
+        payload["scale"] = x_scaler.scale_.tolist()
+        payload["data_min"] = x_scaler.data_min_.tolist()
+        payload["data_max"] = x_scaler.data_max_.tolist()
+        payload["data_range"] = x_scaler.data_range_.tolist()
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
 def make_json_safe(obj):
     if isinstance(obj, dict):
         return {str(k): make_json_safe(v) for k, v in obj.items()}
@@ -165,6 +216,7 @@ def make_json_safe(obj):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     return obj
+
 
 # --------------------------------------------------
 # Load Step2 outputs
@@ -214,7 +266,8 @@ st.write({
     "X": tuple(X.shape),
     "y": tuple(y.shape),
     "meta_rows": int(len(meta_df)),
-    "targets": target_names
+    "targets": target_names,
+    "n_features": int(X.shape[2]),
 })
 
 with st.expander("Step2 config.json"):
@@ -235,7 +288,7 @@ with st.sidebar:
     st.divider()
     st.header("Scaling")
     x_scaler_type = st.selectbox("X scaler", ["StandardScaler", "MinMaxScaler", "No scaling"], index=0)
-    y_scaler_type = st.selectbox("y scaler", ["StandardScaler", "MinMaxScaler", "No scaling"], index=0)
+    y_scaler_type = st.selectbox("y scaler", ["No scaling", "StandardScaler", "MinMaxScaler"], index=0)
 
     st.divider()
     st.header("Model")
@@ -292,6 +345,7 @@ X_test, y_test   = X[test_idx], y[test_idx]
 st.subheader("3) Run experiment")
 
 if st.button("Run (train + evaluate + export run pack)"):
+    tf.keras.backend.clear_session()
     tf.random.set_seed(int(seed))
     np.random.seed(int(seed))
 
@@ -305,7 +359,7 @@ if st.button("Run (train + evaluate + export run pack)"):
 
     # Scaling
     x_scaler = make_scaler(x_scaler_type)
-    y_scaler = make_scaler(y_scaler_type)
+    y_scaler = make_scaler(y_scaler_type) if y_scaler_type != "No scaling" else None
 
     if x_scaler is not None:
         x_scaler.fit(flatten_X(X_train))
@@ -417,6 +471,11 @@ if st.button("Run (train + evaluate + export run pack)"):
             os.path.join(out_dir, "scalers.npz"),
             x_scaler_type, y_scaler_type,
             x_scaler, y_scaler
+        )
+        save_x_scaler_json(
+            os.path.join(out_dir, "x_scaler.json"),
+            x_scaler_type,
+            x_scaler
         )
 
     if save_predictions:

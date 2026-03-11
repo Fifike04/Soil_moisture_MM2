@@ -23,46 +23,69 @@ REQUIRED_COLS = ["station", "date"]
 # --------------------------------------------------
 def clean_column_name(col: str) -> str:
     """
-    Normalize column names:
-    - strip spaces
-    - replace tabs with nothing
-    - replace spaces with underscores
-    - replace commas with dots
-    - remove duplicated underscores
+    Normalize column names while preserving meaning.
     """
     c = str(col).strip()
     c = c.replace("\t", "")
+    c = c.replace("\n", "_")
     c = c.replace(" ", "_")
-    c = c.replace(",", ".")
+    c = c.replace("__", "_")
     while "__" in c:
         c = c.replace("__", "_")
     return c
 
 
 def normalize_station(series: pd.Series) -> pd.Series:
-    return (
-        series.astype(str)
-        .str.strip()
-        .str.lower()
-    )
+    return series.astype(str).str.strip().str.lower()
 
 
 def parse_date_column(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, errors="coerce")
+    """
+    Robust parser for mixed date formats such as:
+    - 2019. 5. 8. 2:00
+    - 08/05/2019 02:00
+    - 2019-05-08 02:00
+    """
+    s = series.astype(str).str.strip()
+
+    # First try general parsing
+    dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+    # If many values fail, try dotted Hungarian-like format
+    if dt.notna().sum() < max(1, int(len(s) * 0.7)):
+        candidates = [
+            "%Y. %m. %d. %H:%M",
+            "%Y.%m.%d. %H:%M",
+            "%d/%m/%Y %H:%M",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%d/%m/%Y",
+        ]
+        best = dt
+        best_count = dt.notna().sum()
+
+        for fmt in candidates:
+            trial = pd.to_datetime(s, format=fmt, errors="coerce")
+            count = trial.notna().sum()
+            if count > best_count:
+                best = trial
+                best_count = count
+
+        dt = best
+
+    return dt
 
 
 def try_convert_numeric(series: pd.Series) -> pd.Series:
     """
-    Try to convert object columns to numeric if possible.
-    Handles comma decimal separators.
-    Keeps original if conversion would fail for most values.
+    Convert to numeric if enough values are numeric-like.
+    Handles comma decimals safely.
     """
     if pd.api.types.is_numeric_dtype(series):
-        return series
+        return pd.to_numeric(series, errors="coerce")
 
     s = series.astype(str).str.strip()
 
-    # common placeholders -> NaN
     s = s.replace({
         "": np.nan,
         "nan": np.nan,
@@ -73,12 +96,11 @@ def try_convert_numeric(series: pd.Series) -> pd.Series:
         "-": np.nan
     })
 
-    # decimal comma -> decimal point
+    # convert decimal commas to decimal points
     s2 = s.str.replace(",", ".", regex=False)
 
     converted = pd.to_numeric(s2, errors="coerce")
 
-    # if enough values can be parsed, use numeric version
     non_na_original = s.notna().sum()
     non_na_converted = converted.notna().sum()
 
@@ -87,7 +109,7 @@ def try_convert_numeric(series: pd.Series) -> pd.Series:
 
     ratio = non_na_converted / max(non_na_original, 1)
 
-    # threshold can be adjusted; 0.6 is a safe compromise
+    # Use numeric version if most non-empty values are parseable
     if ratio >= 0.6:
         return converted
 
@@ -100,6 +122,18 @@ def validate_required_columns(df: pd.DataFrame):
         raise ValueError(f"Missing required columns: {missing}")
 
 
+def report_column_types(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for c in df.columns:
+        rows.append({
+            "column": c,
+            "dtype": str(df[c].dtype),
+            "missing": int(df[c].isna().sum()),
+            "missing_ratio": float(df[c].isna().mean())
+        })
+    return pd.DataFrame(rows)
+
+
 # --------------------------------------------------
 # Load
 # --------------------------------------------------
@@ -107,7 +141,7 @@ st.subheader("1) Load input file")
 
 if not os.path.exists(INPUT_FILE):
     st.error(f"Input file not found: {INPUT_FILE}")
-    st.info("Tedd a fájlt a projekt mappájába ezzel a névvel: combined_stations.xlsx")
+    st.info("Place the file in the project folder with this exact name: combined_stations.xlsx")
     st.stop()
 
 try:
@@ -126,23 +160,25 @@ st.dataframe(df.head(20), use_container_width=True)
 st.subheader("2) Clean dataset")
 
 try:
-    # Clean column names
     df = df.copy()
+
+    # Clean column names
+    original_cols = list(df.columns)
     df.columns = [clean_column_name(c) for c in df.columns]
 
-    # Check required columns
+    # Validate required columns
     validate_required_columns(df)
 
-    # Normalize station/date
+    # Normalize station and parse date
     df["station"] = normalize_station(df["station"])
     df["date"] = parse_date_column(df["date"])
 
-    # Drop rows with missing date
+    # Drop rows with invalid date
     before_drop_date = len(df)
     df = df.dropna(subset=["date"])
     dropped_date_rows = before_drop_date - len(df)
 
-    # Convert non-key columns to numeric where possible
+    # Convert all non-key columns to numeric where possible
     for col in df.columns:
         if col in ["station", "date"]:
             continue
@@ -161,6 +197,9 @@ st.write("Dropped rows with invalid/missing date:", dropped_date_rows)
 
 with st.expander("Cleaned column names"):
     st.write(list(df.columns))
+
+with st.expander("Column type summary"):
+    st.dataframe(report_column_types(df), use_container_width=True)
 
 st.dataframe(df.head(20), use_container_width=True)
 

@@ -30,6 +30,7 @@ STEP2_FEAT_PARQUET = os.path.join(OUT2, "features_clean_step2.parquet")
 STEP2_FEAT_CSV = os.path.join(OUT2, "features_clean_step2.csv")
 
 MODEL_PATH = os.path.join(OUT3, "model.keras")
+X_SCALER_PATH = os.path.join(OUT3, "x_scaler.json")
 
 OUT_CSV = os.path.join(OUT8, "step8_multistep_forecast.csv")
 OUT_JSON = os.path.join(OUT8, "step8_summary.json")
@@ -43,6 +44,7 @@ def require_file(path: str, label: str):
         st.code(path)
         st.stop()
 
+
 def load_step1_output():
     if os.path.exists(STEP1_CSV):
         df = pd.read_csv(STEP1_CSV)
@@ -54,6 +56,7 @@ def load_step1_output():
         raise FileNotFoundError("Step1 output not found.")
     return df, src
 
+
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip().replace("\t", "") for c in df.columns]
@@ -62,9 +65,10 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Missing required columns: {STATION_COL}, {DATE_COL}")
 
     df[STATION_COL] = df[STATION_COL].astype(str).str.strip().str.lower()
-    df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce", dayfirst=True)
     df = df.dropna(subset=[DATE_COL]).sort_values([STATION_COL, DATE_COL]).reset_index(drop=True)
     return df
+
 
 def add_lags_and_rollings(
     df: pd.DataFrame,
@@ -96,6 +100,7 @@ def add_lags_and_rollings(
 
     return out
 
+
 def apply_nan_strategy(df_feat: pd.DataFrame, strategy: str):
     if strategy == "None (strict)":
         return df_feat
@@ -116,17 +121,55 @@ def apply_nan_strategy(df_feat: pd.DataFrame, strategy: str):
     out = df_feat.groupby(STATION_COL, group_keys=False).apply(interp_group)
     return out.sort_values([STATION_COL, DATE_COL]).reset_index(drop=True)
 
+
 def to_numeric_safe(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
         if c not in out.columns:
             continue
-        if out[c].dtype == object:
-            s = out[c].astype(str).str.replace(",", ".", regex=False)
-            out[c] = pd.to_numeric(s, errors="coerce")
-        else:
+        if pd.api.types.is_numeric_dtype(out[c]):
             out[c] = pd.to_numeric(out[c], errors="coerce")
+        else:
+            s = (
+                out[c]
+                .astype(str)
+                .str.strip()
+                .replace({"": np.nan, "nan": np.nan, "None": np.nan, "none": np.nan, "-": np.nan})
+                .str.replace(",", ".", regex=False)
+            )
+            out[c] = pd.to_numeric(s, errors="coerce")
     return out
+
+
+def flatten_X(X: np.ndarray) -> np.ndarray:
+    n, t, f = X.shape
+    return X.reshape(n * t, f)
+
+
+def unflatten_X(X_flat: np.ndarray, n: int, t: int) -> np.ndarray:
+    f = X_flat.shape[1]
+    return X_flat.reshape(n, t, f)
+
+
+def apply_x_scaler(X: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
+    Xf = flatten_X(X).astype(np.float32)
+    Xf = (Xf - mu) / sd
+    return unflatten_X(Xf, X.shape[0], X.shape[1]).astype(np.float32)
+
+
+def load_x_scaler(path: str):
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            sc = json.load(f)
+        mu = np.asarray(sc["mean"], dtype=np.float32)
+        sd = np.asarray(sc["std"], dtype=np.float32)
+        sd = np.where(sd == 0, 1.0, sd).astype(np.float32)
+        return mu, sd
+    except Exception:
+        return None, None
+
 
 def update_feature_vector_autoregressive(
     last_feat_vec: np.ndarray,
@@ -136,13 +179,14 @@ def update_feature_vector_autoregressive(
     max_lag: int = 30,
 ):
     """
-    Next-step feature vector from the last timestep vector.
+    Build next-step feature vector from last timestep vector.
 
+    Rules:
     - Base target cols get replaced by predicted values
     - target lag1 <- previous base
     - target lag2 <- previous lag1
     - etc.
-    - other features remain unchanged
+    - all other features remain unchanged (persistence assumption)
     """
     next_vec = last_feat_vec.copy()
     idx = {c: j for j, c in enumerate(feature_cols)}
@@ -173,6 +217,7 @@ def update_feature_vector_autoregressive(
 
     return next_vec
 
+
 def make_json_safe(obj):
     if isinstance(obj, dict):
         return {str(k): make_json_safe(v) for k, v in obj.items()}
@@ -202,10 +247,10 @@ except Exception as e:
     st.error(f"Failed to load model: {e}")
     st.stop()
 
-window = int(step2_cfg.get("window", 30))
+window = int(step2_cfg.get("window", 7))
 target_cols = step2_cfg.get("target_cols", DEFAULT_TARGETS)
 final_feature_cols = step2_cfg.get("final_feature_cols", [])
-nan_strategy = step2_cfg.get("nan_strategy", "None (strict)")
+nan_strategy = step2_cfg.get("nan_strategy", "Time-based interpolation (numeric) within station")
 
 lag_cols = step2_cfg.get("lag_cols", [])
 lags = step2_cfg.get("lags", [])
@@ -228,6 +273,26 @@ if not final_feature_cols:
     st.stop()
 
 # --------------------------------------------------
+# Load scaler
+# --------------------------------------------------
+st.subheader("2) Load Step3 input scaler")
+
+mu, sd = load_x_scaler(X_SCALER_PATH)
+if mu is not None and sd is not None:
+    st.success("Step3 x_scaler.json loaded ✅")
+    st.write(f"Scaler feature dimension: {len(mu)}")
+else:
+    st.warning("No valid x_scaler.json found. Forecasting will run without scaling.")
+    mu, sd = None, None
+
+if mu is not None and len(mu) != len(final_feature_cols):
+    st.warning(
+        f"Scaler dimension ({len(mu)}) does not match final_feature_cols ({len(final_feature_cols)}). "
+        "Scaling will be skipped."
+    )
+    mu, sd = None, None
+
+# --------------------------------------------------
 # Sidebar settings
 # --------------------------------------------------
 with st.sidebar:
@@ -240,6 +305,10 @@ with st.sidebar:
     )
 
     st.divider()
+    st.header("Scaling")
+    apply_scaling = st.checkbox("Apply Step3 X scaling", value=True)
+
+    st.divider()
     st.header("Feature source")
     use_saved_feat_default = os.path.exists(STEP2_FEAT_PARQUET) or os.path.exists(STEP2_FEAT_CSV)
     use_saved_feat = st.checkbox("Use Step2 saved engineered features", value=use_saved_feat_default)
@@ -247,7 +316,7 @@ with st.sidebar:
 # --------------------------------------------------
 # Load / rebuild engineered features
 # --------------------------------------------------
-st.subheader("2) Prepare feature source")
+st.subheader("3) Prepare feature source")
 
 df_feat_source = None
 
@@ -298,7 +367,7 @@ st.dataframe(df_feat.tail(20), use_container_width=True)
 # --------------------------------------------------
 # Validate features
 # --------------------------------------------------
-st.subheader("3) Validate feature columns")
+st.subheader("4) Validate feature columns")
 
 missing_feat_cols = [c for c in final_feature_cols if c not in df_feat.columns]
 if missing_feat_cols:
@@ -317,7 +386,7 @@ if method.startswith("Autoregressive") and not targets_in_features:
 # --------------------------------------------------
 # Build latest window per station
 # --------------------------------------------------
-st.subheader("4) Build latest window per station")
+st.subheader("5) Build latest window per station")
 
 stations = []
 last_dates = []
@@ -361,14 +430,20 @@ st.write("Input window shape:", X_unscaled.shape)
 # --------------------------------------------------
 # Forecast loop
 # --------------------------------------------------
-st.subheader("5) Multi-step forecast")
+st.subheader("6) Multi-step forecast")
 
 all_preds = []
 forecast_dates = []
 
 for step in range(1, n_steps + 1):
+    # scale before each prediction if needed
+    if apply_scaling and mu is not None and sd is not None:
+        X_used = apply_x_scaler(X_unscaled, mu, sd)
+    else:
+        X_used = X_unscaled
+
     with st.spinner(f"Predicting step {step}/{n_steps}..."):
-        y_pred = model.predict(X_unscaled, verbose=0)
+        y_pred = model.predict(X_used, verbose=0)
 
     if y_pred.ndim == 1:
         y_pred = y_pred.reshape(-1, 1)
@@ -422,7 +497,7 @@ st.dataframe(out_df.head(50), use_container_width=True)
 # --------------------------------------------------
 # Plots
 # --------------------------------------------------
-st.subheader("6) Forecast plots")
+st.subheader("7) Forecast plots")
 
 selected_station = st.selectbox("Select station to plot", options=stations, index=0)
 station_df = out_df[out_df["station"] == selected_station].sort_values("step_ahead_days")
@@ -438,7 +513,7 @@ for t in out_targets:
 # --------------------------------------------------
 # Save outputs
 # --------------------------------------------------
-st.subheader("7) Save outputs")
+st.subheader("8) Save outputs")
 
 if st.button("Save forecast to outputs/step8"):
     try:
@@ -448,6 +523,7 @@ if st.button("Save forecast to outputs/step8"):
             "inputs": {
                 "step2_config": STEP2_CFG,
                 "step3_model": MODEL_PATH,
+                "step3_x_scaler": X_SCALER_PATH if (apply_scaling and mu is not None) else None,
                 "feature_source": df_feat_source,
             },
             "settings": {

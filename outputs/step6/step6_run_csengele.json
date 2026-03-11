@@ -1,0 +1,51 @@
+{
+  "inputs": {
+    "X": "outputs/step2/X.npy",
+    "y": "outputs/step2/y.npy",
+    "meta": "outputs/step2/meta.csv",
+    "config": "outputs/step2/config.json"
+  },
+  "holdout_station": "csengele",
+  "splits": {
+    "train": {
+      "start": "2016-01-01",
+      "end": "2022-12-31",
+      "n": 5111
+    },
+    "val": {
+      "start": "2023-01-01",
+      "end": "2023-12-31",
+      "n": 1270
+    },
+    "test": {
+      "start": "2024-01-01",
+      "end": "2025-12-31",
+      "n": 240
+    }
+  },
+  "scaling": {
+    "x_scaler": "StandardScaler",
+    "y_scaler": "No scaling"
+  },
+  "hyperparams": {
+    "lstm_units1": 64,
+    "lstm_units2": 32,
+    "dropout": 0.1,
+    "dense_units": 32,
+    "learning_rate": 0.001,
+    "batch_size": 64,
+    "epochs": 30,
+    "patience": 7
+  },
+  "test_overall": {
+    "MAE_mean_over_targets": 1.9439099828402202,
+    "RMSE_mean_over_targets": 2.3351064508648043,
+    "R2_mean_over_targets": 0.2651924391587575,
+    "Bias_mean_over_targets": 0.14333693496882915,
+    "Relative_Error_%_mean_over_targets": 164.936505317688
+  },
+  "outputs": {
+    "metrics": "outputs/step6/holdout_metrics_csengele.csv",
+    "compare": null
+  }
+}

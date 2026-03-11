@@ -21,6 +21,7 @@ Y_PATH = os.path.join(OUT2, "y.npy")
 META_PATH = os.path.join(OUT2, "meta.csv")
 CFG_PATH = os.path.join(OUT2, "config.json")
 MODEL_PATH = os.path.join(OUT3, "model.keras")
+X_SCALER_PATH = os.path.join(OUT3, "x_scaler.json")
 
 MONTH_OUT = os.path.join(OUT7, "monthly_pooled_metrics.csv")
 SEASON_OUT = os.path.join(OUT7, "seasonal_pooled_metrics.csv")
@@ -37,6 +38,7 @@ def require_file(path: str, label: str):
         st.code(path)
         st.stop()
 
+
 def season_from_month(m: int) -> str:
     if m in (12, 1, 2):
         return "DJF"
@@ -46,9 +48,11 @@ def season_from_month(m: int) -> str:
         return "JJA"
     return "SON"
 
+
 def date_mask(meta_df: pd.DataFrame, start: str, end: str) -> np.ndarray:
     d = pd.to_datetime(meta_df["target_date"], errors="coerce")
     return ((d >= pd.to_datetime(start)) & (d <= pd.to_datetime(end))).to_numpy()
+
 
 def pooled_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     err = y_pred - y_true
@@ -56,6 +60,7 @@ def pooled_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
         "MAE_pooled": float(np.mean(np.abs(err))),
         "RMSE_pooled": float(np.sqrt(np.mean(err ** 2))),
     }
+
 
 def per_target_metrics_numpy(y_true: np.ndarray, y_pred: np.ndarray, target_names: list[str]) -> pd.DataFrame:
     rows = []
@@ -79,6 +84,7 @@ def per_target_metrics_numpy(y_true: np.ndarray, y_pred: np.ndarray, target_name
         })
     return pd.DataFrame(rows)
 
+
 def plot_month_bar(df_month: pd.DataFrame, metric_col: str, title: str):
     fig = plt.figure()
     x = df_month["month"].astype(int).to_numpy()
@@ -90,6 +96,7 @@ def plot_month_bar(df_month: pd.DataFrame, metric_col: str, title: str):
     plt.title(title)
     return fig
 
+
 def plot_season_bar(df_season: pd.DataFrame, metric_col: str, title: str):
     order = ["DJF", "MAM", "JJA", "SON"]
     fig = plt.figure()
@@ -99,6 +106,37 @@ def plot_season_bar(df_season: pd.DataFrame, metric_col: str, title: str):
     plt.ylabel(metric_col)
     plt.title(title)
     return fig
+
+
+def flatten_X(X: np.ndarray) -> np.ndarray:
+    n, t, f = X.shape
+    return X.reshape(n * t, f)
+
+
+def unflatten_X(X_flat: np.ndarray, n: int, t: int) -> np.ndarray:
+    f = X_flat.shape[1]
+    return X_flat.reshape(n, t, f)
+
+
+def apply_x_scaler(X: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
+    Xf = flatten_X(X).astype(np.float32)
+    Xf = (Xf - mu) / sd
+    return unflatten_X(Xf, X.shape[0], X.shape[1]).astype(np.float32)
+
+
+def load_x_scaler(path: str):
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            sc = json.load(f)
+        mu = np.asarray(sc["mean"], dtype=np.float32)
+        sd = np.asarray(sc["std"], dtype=np.float32)
+        sd = np.where(sd == 0, 1.0, sd).astype(np.float32)
+        return mu, sd
+    except Exception:
+        return None, None
+
 
 def make_json_safe(obj):
     if isinstance(obj, dict):
@@ -110,6 +148,7 @@ def make_json_safe(obj):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     return obj
+
 
 # --------------------------------------------------
 # Load Step2 + Step3 outputs
@@ -163,11 +202,32 @@ st.write({
     "X_shape": tuple(X.shape),
     "y_shape": tuple(y.shape),
     "meta_rows": int(len(meta_df)),
-    "targets": target_names
+    "targets": target_names,
+    "n_features": int(X.shape[2]),
 })
 
 with st.expander("Step2 config"):
     st.json(step2_cfg)
+
+# --------------------------------------------------
+# Load Step3 scaler
+# --------------------------------------------------
+st.subheader("2) Load Step3 input scaler")
+
+mu, sd = load_x_scaler(X_SCALER_PATH)
+if mu is not None and sd is not None:
+    st.success("Step3 x_scaler.json loaded ✅")
+    st.write(f"Scaler feature dimension: {len(mu)}")
+else:
+    st.warning("No valid x_scaler.json found. Step 7 will run without scaling.")
+    mu, sd = None, None
+
+if mu is not None and len(mu) != X.shape[2]:
+    st.warning(
+        f"Scaler dimension ({len(mu)}) does not match X feature dimension ({X.shape[2]}). "
+        "Scaling will be skipped."
+    )
+    mu, sd = None, None
 
 # --------------------------------------------------
 # Sidebar settings
@@ -176,6 +236,10 @@ with st.sidebar:
     st.header("Test date range (by target_date)")
     test_start = st.text_input("Test start", value="2024-01-01")
     test_end = st.text_input("Test end", value="2025-12-31")
+
+    st.divider()
+    st.header("Scaling")
+    apply_scaling = st.checkbox("Apply Step3 X scaling", value=True)
 
     st.divider()
     st.header("Wet/Dry regime (optional)")
@@ -190,7 +254,7 @@ with st.sidebar:
 # --------------------------------------------------
 # Build test subset
 # --------------------------------------------------
-st.subheader("2) Build test subset")
+st.subheader("3) Build test subset")
 
 test_idx = date_mask(meta_df, test_start, test_end)
 n_test = int(test_idx.sum())
@@ -217,10 +281,17 @@ meta_test["season"] = meta_test["month"].astype(int).apply(season_from_month)
 # --------------------------------------------------
 # Predict
 # --------------------------------------------------
-st.subheader("3) Predict on test subset")
+st.subheader("4) Predict on test subset")
+
+if apply_scaling and mu is not None and sd is not None:
+    X_test_used = apply_x_scaler(X_test, mu, sd)
+    st.info("Applied Step3 scaling to X_test.")
+else:
+    X_test_used = X_test
+    st.info("No scaling applied to X_test.")
 
 with st.spinner("Predicting..."):
-    y_pred = model.predict(X_test, verbose=0)
+    y_pred = model.predict(X_test_used, verbose=0)
 
 if y_pred.ndim == 1:
     y_pred = y_pred.reshape(-1, 1)
@@ -232,7 +303,7 @@ if y_pred.shape != y_test.shape:
 # --------------------------------------------------
 # Monthly report
 # --------------------------------------------------
-st.subheader("4) Monthly performance (pooled across targets)")
+st.subheader("5) Monthly performance (pooled across targets)")
 
 month_rows = []
 for m in range(1, 13):
@@ -260,7 +331,7 @@ st.pyplot(plot_month_bar(df_month.dropna(), "RMSE_pooled", "Monthly RMSE (pooled
 # --------------------------------------------------
 # Seasonal report
 # --------------------------------------------------
-st.subheader("5) Seasonal performance (pooled across targets)")
+st.subheader("6) Seasonal performance (pooled across targets)")
 
 season_rows = []
 for s in ["DJF", "MAM", "JJA", "SON"]:
@@ -288,7 +359,7 @@ st.pyplot(plot_season_bar(df_season.dropna(), "RMSE_pooled", "Seasonal RMSE (poo
 # --------------------------------------------------
 # Per-target by season
 # --------------------------------------------------
-st.subheader("6) Per-target metrics by season")
+st.subheader("7) Per-target metrics by season")
 
 blocks = []
 for s in ["DJF", "MAM", "JJA", "SON"]:
@@ -310,7 +381,7 @@ else:
 # --------------------------------------------------
 # Wet/Dry regime
 # --------------------------------------------------
-st.subheader("7) Wet/Dry regime report (optional)")
+st.subheader("8) Wet/Dry regime report (optional)")
 
 df_reg = None
 if regime_on and regime_proxy in meta_test.columns:
@@ -341,7 +412,7 @@ elif regime_on:
 # --------------------------------------------------
 # Save outputs
 # --------------------------------------------------
-st.subheader("8) Save outputs")
+st.subheader("9) Save outputs")
 
 if st.button("Save report to outputs/step7"):
     try:
@@ -367,7 +438,8 @@ if st.button("Save report to outputs/step7"):
                 "y": Y_PATH,
                 "meta": META_PATH,
                 "config": CFG_PATH,
-                "model": MODEL_PATH
+                "model": MODEL_PATH,
+                "x_scaler": X_SCALER_PATH if (apply_scaling and mu is not None) else None,
             },
             "test_range": {
                 "start": test_start,

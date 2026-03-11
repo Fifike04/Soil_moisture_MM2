@@ -4,12 +4,13 @@
     "y": "outputs/step2/y.npy",
     "meta": "outputs/step2/meta.csv",
     "config": "outputs/step2/config.json",
-    "model": "outputs/step3/model.keras"
+    "model": "outputs/step3/model.keras",
+    "x_scaler": "outputs/step3/x_scaler.json"
   },
   "test_range": {
     "start": "2024-01-01",
     "end": "2025-12-31",
-    "n": 10
+    "n": 2238
   },
   "outputs": {
     "monthly": "outputs/step7/monthly_pooled_metrics.csv",

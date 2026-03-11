@@ -28,6 +28,7 @@ STEP2_FEAT_PARQUET = os.path.join(OUT2, "features_clean_step2.parquet")
 STEP2_FEAT_CSV = os.path.join(OUT2, "features_clean_step2.csv")
 
 MODEL_PATH = os.path.join(OUT3, "model.keras")
+X_SCALER_PATH = os.path.join(OUT3, "x_scaler.json")
 
 OUT_CSV = os.path.join(OUT4, "predictions_step4.csv")
 OUT_PARQUET = os.path.join(OUT4, "predictions_step4.parquet")
@@ -42,6 +43,7 @@ def require_file(path: str, label: str):
         st.code(path)
         st.stop()
 
+
 def load_step1_output():
     if os.path.exists(STEP1_CSV):
         df = pd.read_csv(STEP1_CSV)
@@ -53,6 +55,7 @@ def load_step1_output():
         raise FileNotFoundError("Step1 output not found.")
     return df, src
 
+
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip().replace("\t", "") for c in df.columns]
@@ -61,9 +64,10 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Missing required columns: {STATION_COL}, {DATE_COL}")
 
     df[STATION_COL] = df[STATION_COL].astype(str).str.strip().str.lower()
-    df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce", dayfirst=True)
     df = df.dropna(subset=[DATE_COL]).sort_values([STATION_COL, DATE_COL]).reset_index(drop=True)
     return df
+
 
 def add_lags_and_rollings(
     df: pd.DataFrame,
@@ -95,6 +99,7 @@ def add_lags_and_rollings(
 
     return out
 
+
 def apply_nan_strategy(df_feat: pd.DataFrame, strategy: str):
     if strategy == "None (strict)":
         return df_feat
@@ -115,17 +120,56 @@ def apply_nan_strategy(df_feat: pd.DataFrame, strategy: str):
     out = df_feat.groupby(STATION_COL, group_keys=False).apply(interp_group)
     return out.sort_values([STATION_COL, DATE_COL]).reset_index(drop=True)
 
+
 def to_numeric_safe(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
         if c not in out.columns:
             continue
-        if out[c].dtype == object:
-            s = out[c].astype(str).str.replace(",", ".", regex=False)
-            out[c] = pd.to_numeric(s, errors="coerce")
-        else:
+
+        if pd.api.types.is_numeric_dtype(out[c]):
             out[c] = pd.to_numeric(out[c], errors="coerce")
+        else:
+            s = (
+                out[c]
+                .astype(str)
+                .str.strip()
+                .replace({"": np.nan, "nan": np.nan, "None": np.nan, "none": np.nan, "-": np.nan})
+                .str.replace(",", ".", regex=False)
+            )
+            out[c] = pd.to_numeric(s, errors="coerce")
     return out
+
+
+def flatten_X(X: np.ndarray) -> np.ndarray:
+    n, t, f = X.shape
+    return X.reshape(n * t, f)
+
+
+def unflatten_X(X_flat: np.ndarray, n: int, t: int) -> np.ndarray:
+    f = X_flat.shape[1]
+    return X_flat.reshape(n, t, f)
+
+
+def apply_x_scaler(X: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
+    Xf = flatten_X(X).astype(np.float32)
+    Xf = (Xf - mu) / sd
+    return unflatten_X(Xf, X.shape[0], X.shape[1]).astype(np.float32)
+
+
+def load_x_scaler(path: str):
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            sc = json.load(f)
+        mu = np.asarray(sc["mean"], dtype=np.float32)
+        sd = np.asarray(sc["std"], dtype=np.float32)
+        sd = np.where(sd == 0, 1.0, sd).astype(np.float32)
+        return mu, sd
+    except Exception:
+        return None, None
+
 
 def make_json_safe(obj):
     if isinstance(obj, dict):
@@ -137,6 +181,7 @@ def make_json_safe(obj):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     return obj
+
 
 # --------------------------------------------------
 # Load config + model
@@ -156,10 +201,10 @@ except Exception as e:
     st.error(f"Failed to load model: {e}")
     st.stop()
 
-window = int(step2_cfg.get("window", 30))
+window = int(step2_cfg.get("window", 7))
 target_cols = step2_cfg.get("target_cols", [])
 final_feature_cols = step2_cfg.get("final_feature_cols", [])
-nan_strategy = step2_cfg.get("nan_strategy", "None (strict)")
+nan_strategy = step2_cfg.get("nan_strategy", "Time-based interpolation (numeric) within station")
 
 lag_cols = step2_cfg.get("lag_cols", [])
 lags = step2_cfg.get("lags", [])
@@ -177,9 +222,22 @@ if not final_feature_cols:
     st.stop()
 
 # --------------------------------------------------
+# Load scaler
+# --------------------------------------------------
+st.subheader("2) Load Step3 input scaler")
+
+mu, sd = load_x_scaler(X_SCALER_PATH)
+if mu is not None and sd is not None:
+    st.success("Step3 x_scaler.json loaded ✅")
+    st.write(f"Scaler feature dimension: {len(mu)}")
+else:
+    st.warning("No valid x_scaler.json found. Inference will run without scaling.")
+    mu, sd = None, None
+
+# --------------------------------------------------
 # Feature source
 # --------------------------------------------------
-st.subheader("2) Load feature source")
+st.subheader("3) Load feature source")
 
 use_saved_feat_default = os.path.exists(STEP2_FEAT_PARQUET) or os.path.exists(STEP2_FEAT_CSV)
 use_saved_feat = st.checkbox("Use Step2 saved engineered features (recommended)", value=use_saved_feat_default)
@@ -231,7 +289,7 @@ st.dataframe(df_feat.tail(20), use_container_width=True)
 # --------------------------------------------------
 # Validate features
 # --------------------------------------------------
-st.subheader("3) Validate feature columns")
+st.subheader("4) Validate feature columns")
 
 missing_feat_cols = [c for c in final_feature_cols if c not in df_feat.columns]
 if missing_feat_cols:
@@ -241,10 +299,17 @@ if missing_feat_cols:
 
 df_feat = to_numeric_safe(df_feat, final_feature_cols + target_cols)
 
+if mu is not None and len(mu) != len(final_feature_cols):
+    st.warning(
+        f"Scaler dimension ({len(mu)}) does not match final_feature_cols ({len(final_feature_cols)}). "
+        "Scaling will be skipped to avoid incorrect inference."
+    )
+    mu, sd = None, None
+
 # --------------------------------------------------
 # Build latest windows
 # --------------------------------------------------
-st.subheader("4) Build latest input window per station")
+st.subheader("5) Build latest input window per station")
 
 stations = []
 last_dates = []
@@ -286,14 +351,26 @@ if skipped:
         st.dataframe(pd.DataFrame(skipped, columns=["station", "reason"]), use_container_width=True)
 
 # --------------------------------------------------
+# Apply scaling
+# --------------------------------------------------
+st.subheader("6) Apply Step3 scaling")
+
+if mu is not None and sd is not None:
+    X_latest_scaled = apply_x_scaler(X_latest, mu, sd)
+    st.success("Input windows scaled with Step3 x_scaler.json ✅")
+else:
+    X_latest_scaled = X_latest
+    st.info("No scaling applied.")
+
+# --------------------------------------------------
 # Predict
 # --------------------------------------------------
-st.subheader("5) Predict")
+st.subheader("7) Predict")
 
 if st.button("Run inference + save to outputs/step4"):
     try:
         with st.spinner("Predicting..."):
-            y_pred = model.predict(X_latest, verbose=0)
+            y_pred = model.predict(X_latest_scaled, verbose=0)
 
         if y_pred.ndim == 1:
             y_pred = y_pred.reshape(-1, 1)
@@ -332,11 +409,13 @@ if st.button("Run inference + save to outputs/step4"):
             "inputs": {
                 "step2_config": STEP2_CFG,
                 "step3_model": MODEL_PATH,
+                "step3_x_scaler": X_SCALER_PATH if mu is not None else None,
                 "feature_source": df_feat_source,
             },
             "settings": {
                 "window": int(window),
                 "target_cols": target_cols,
+                "n_features": int(len(final_feature_cols)),
                 "n_stations_predicted": int(len(stations)),
             },
             "outputs": {
