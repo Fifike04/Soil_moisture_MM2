@@ -2,10 +2,11 @@
   "inputs": {
     "step2_config": "outputs/step2/config.json",
     "step3_model": "outputs/step3/model.keras",
+    "step3_x_scaler": "outputs/step3/x_scaler.json",
     "feature_source": "outputs/step2/features_clean_step2.parquet"
   },
   "settings": {
-    "window": 10,
+    "window": 7,
     "target_cols": [
       "_SM10",
       "_SM20",
@@ -14,6 +15,7 @@
       "_SM60",
       "_SM75"
     ],
+    "n_features": 97,
     "n_stations_predicted": 10
   },
   "outputs": {

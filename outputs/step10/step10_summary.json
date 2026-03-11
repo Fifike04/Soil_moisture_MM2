@@ -1,0 +1,56 @@
+{
+  "inputs": {
+    "step1_source": "outputs/step1/combined_stations_clean_step1.csv",
+    "step2_feature_source": "outputs/step2/features_clean_step2.parquet",
+    "X": "outputs/step2/X.npy",
+    "y": "outputs/step2/y.npy",
+    "meta": "outputs/step2/meta.csv",
+    "config": "outputs/step2/config.json",
+    "model": "outputs/step3/model.keras",
+    "x_scaler": "outputs/step3/x_scaler.json"
+  },
+  "scatter_subset": {
+    "name": "Test",
+    "train_range": [
+      "2016-01-01",
+      "2022-12-31"
+    ],
+    "val_range": [
+      "2023-01-01",
+      "2023-12-31"
+    ],
+    "test_range": [
+      "2024-01-01",
+      "2025-12-31"
+    ],
+    "n_samples": 2238
+  },
+  "cleaning_plot": {
+    "station": "csengele",
+    "columns": [
+      "_SM10",
+      "_SM20",
+      "_SM30"
+    ],
+    "plot_start_date": "",
+    "plot_end_date": "",
+    "smooth_window": 7
+  },
+  "outputs": {
+    "scatter_metrics_csv": "outputs/step10/scatter_metrics.csv",
+    "scatter_plot_files": [
+      "outputs/step10/scatter__SM10.png",
+      "outputs/step10/scatter__SM20.png",
+      "outputs/step10/scatter__SM30.png",
+      "outputs/step10/scatter__SM45.png",
+      "outputs/step10/scatter__SM60.png",
+      "outputs/step10/scatter__SM75.png"
+    ],
+    "cleaning_plot_files": [
+      "outputs/step10/cleaning_csengele__SM10.png",
+      "outputs/step10/cleaning_csengele__SM20.png",
+      "outputs/step10/cleaning_csengele__SM30.png"
+    ],
+    "summary_json": "outputs/step10/step10_summary.json"
+  }
+}
